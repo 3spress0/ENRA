@@ -212,9 +212,7 @@ EOF
     chmod 600 "$HOSTAPD_FILE"
     unset PASSPHRASE
 
-    if ! hostapd -t "$HOSTAPD_FILE"; then
-        die "hostapd rejected the WPA3 configuration. Check the installed hostapd build."
-    fi
+
 }
 
 install_systemd_units() {
