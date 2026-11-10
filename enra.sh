@@ -1018,12 +1018,12 @@ validate() {
             validate_check fail "No routed network segments are configured."
 
         local segment_arrays_valid=yes
-        if [[ "$segment_count" -ne "${#SEGMENT_NAMES[@]}" ||
-              "$segment_count" -ne "${#SEGMENT_GATEWAYS[@]}" ||
-              "$segment_count" -ne "${#SEGMENT_PREFIXES[@]}" ||
-              "$segment_count" -ne "${#SEGMENT_NETWORKS[@]}" ||
-              "$segment_count" -ne "${#SEGMENT_DHCP_STARTS[@]}" ||
-              "$segment_count" -ne "${#SEGMENT_DHCP_ENDS[@]}" ]]; then
+        if (( segment_count != ${#SEGMENT_NAMES[@]} ||
+              segment_count != ${#SEGMENT_GATEWAYS[@]} ||
+              segment_count != ${#SEGMENT_PREFIXES[@]} ||
+              segment_count != ${#SEGMENT_NETWORKS[@]} ||
+              segment_count != ${#SEGMENT_DHCP_STARTS[@]} ||
+              segment_count != ${#SEGMENT_DHCP_ENDS[@]} )); then
             validate_check fail "Routed segment configuration arrays have different lengths."
             segment_arrays_valid=no
         fi
