@@ -1017,16 +1017,20 @@ validate() {
             validate_check pass "Configured routed segments: $segment_count." ||
             validate_check fail "No routed network segments are configured."
 
-        local segment_arrays_valid=yes
-        if (( segment_count != ${#SEGMENT_NAMES[@]} ||
-              segment_count != ${#SEGMENT_GATEWAYS[@]} ||
-              segment_count != ${#SEGMENT_PREFIXES[@]} ||
-              segment_count != ${#SEGMENT_NETWORKS[@]} ||
-              segment_count != ${#SEGMENT_DHCP_STARTS[@]} ||
-              segment_count != ${#SEGMENT_DHCP_ENDS[@]} )); then
-            validate_check fail "Routed segment configuration arrays have different lengths."
-            segment_arrays_valid=no
-        fi
+        local segment_arrays_valid=yes array_length
+        for array_length in \
+            "${#SEGMENT_NAMES[@]}" \
+            "${#SEGMENT_GATEWAYS[@]}" \
+            "${#SEGMENT_PREFIXES[@]}" \
+            "${#SEGMENT_NETWORKS[@]}" \
+            "${#SEGMENT_DHCP_STARTS[@]}" \
+            "${#SEGMENT_DHCP_ENDS[@]}"; do
+            if (( segment_count != array_length )); then
+                validate_check fail "Routed segment configuration arrays have different lengths."
+                segment_arrays_valid=no
+                break
+            fi
+        done
 
         if [[ "$segment_arrays_valid" == "yes" ]]; then
         for ((i = 0; i < segment_count; i++)); do
