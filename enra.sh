@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly ENRA_VERSION="0.3.0"
+readonly ENRA_VERSION="0.4.0"
 readonly CONFIG_DIR="/etc/enra"
 readonly CONFIG_FILE="$CONFIG_DIR/enra.conf"
 readonly HOSTAPD_FILE="$CONFIG_DIR/hostapd.conf"
 readonly DNSMASQ_FILE="$CONFIG_DIR/dnsmasq.conf"
 readonly BRIDGE_IF="br-enra"
 readonly INSTALLED_SCRIPT="/usr/local/sbin/enra"
+readonly UPDATE_SCRIPT="/usr/local/sbin/enra-update"
 readonly RTL8821AU_REPO="https://github.com/morrownr/8821au-20210708.git"
 readonly RTL8821AU_DIR="/usr/local/src/enra/8821au-20210708"
 
@@ -52,6 +53,8 @@ load_config() {
     [[ -f "$CONFIG_FILE" ]] || die "ENRA is not configured. Run: sudo enra setup"
     # shellcheck source=/etc/enra/enra.conf
     source "$CONFIG_FILE"
+    AUTO_UP_INTERFACES="${AUTO_UP_INTERFACES:-true}"
+    AUTO_UP_EXCLUDE="${AUTO_UP_EXCLUDE:-}"
 
     # Migrate existing single-Wi-Fi routed configurations in memory.
     if [[ "$NETWORK_MODE" == "routed" && -z "${SEGMENT_IFACES+x}" ]]; then
@@ -519,6 +522,8 @@ write_configuration() {
         printf 'AP_GATEWAY=%q\nAP_PREFIX=%q\nAP_NETWORK=%q\n' "$AP_GATEWAY" "$AP_PREFIX" "$AP_NETWORK"
         printf 'DHCP_START=%q\nDHCP_END=%q\nDNS_UPSTREAM=%q\nDRIVER_MODULE=%q\n' \
             "$DHCP_START" "$DHCP_END" "$DNS_UPSTREAM" "${DRIVER_MODULE:-}"
+        printf 'AUTO_UP_INTERFACES=%q\nAUTO_UP_EXCLUDE=%q\n' \
+            "${AUTO_UP_INTERFACES:-true}" "${AUTO_UP_EXCLUDE:-}"
         if [[ "$NETWORK_MODE" == "routed" ]]; then
             write_config_array SEGMENT_IFACES "${SEGMENT_IFACES[@]}"
             write_config_array SEGMENT_NAMES "${SEGMENT_NAMES[@]}"
@@ -626,15 +631,37 @@ EOF
     done
 }
 install_services() {
-    local hostapd_bin dnsmasq_bin
+    local hostapd_bin dnsmasq_bin update_source
     hostapd_bin="$(command -v hostapd)"
     dnsmasq_bin="$(command -v dnsmasq 2>/dev/null || true)"
-    install -D -m 0755 "$SELF_PATH" "$INSTALLED_SCRIPT"
+    if [[ "$(readlink -f "$SELF_PATH")" != "$INSTALLED_SCRIPT" ]]; then
+        install -D -m 0755 "$SELF_PATH" "$INSTALLED_SCRIPT"
+    fi
+    update_source="$(dirname "$SELF_PATH")/update.sh"
+    if [[ -f "$update_source" && "$(readlink -f "$update_source")" != "$UPDATE_SCRIPT" ]]; then
+        install -D -m 0755 "$update_source" "$UPDATE_SCRIPT"
+    fi
+    cat > /etc/systemd/system/enra-devices.service <<'EOF'
+[Unit]
+Description=ENRA bring up detected network interfaces
+Wants=network-pre.target
+After=network-pre.target systemd-udev-settle.service NetworkManager.service systemd-networkd.service
+Before=enra-network.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/enra devices-up
+
+[Install]
+WantedBy=multi-user.target
+EOF
     cat > /etc/systemd/system/enra-network.service <<'EOF'
 [Unit]
 Description=ENRA network configuration
+Requires=enra-devices.service
 Wants=network-pre.target
-After=network-pre.target NetworkManager.service systemd-networkd.service
+After=enra-devices.service network-pre.target NetworkManager.service systemd-networkd.service
 Before=enra-ap.service enra-dnsmasq.service
 
 [Service]
@@ -735,18 +762,20 @@ setup() {
     install_services
     # Only ENRA-owned units are managed here. Debian may intentionally mask
     # the vendor hostapd.service; ENRA runs hostapd directly via enra-ap.service.
-    systemctl unmask enra-network.service enra-ap.service
+    systemctl unmask enra-devices.service enra-network.service enra-ap.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         systemctl unmask enra-dnsmasq.service
     fi
     systemctl daemon-reload
     log "Enabling ENRA services..."
-    systemctl enable enra-network.service enra-ap.service
+    systemctl enable enra-devices.service enra-network.service enra-ap.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         systemctl enable enra-dnsmasq.service
     else
         systemctl disable enra-dnsmasq.service >/dev/null 2>&1 || true
     fi
+    log "Bringing detected network interfaces up..."
+    systemctl restart enra-devices.service || die "Could not bring network interfaces up. Check journalctl -u enra-devices.service."
     log "Starting ENRA network service..."
     systemctl restart enra-network.service || die "Network setup failed. Check journalctl -u enra-network.service."
     log "Starting ENRA access point service..."
@@ -777,6 +806,41 @@ setup() {
     printf '\nRun "enra status" to inspect service health.\n'
 }
 
+
+devices_up() {
+    require_root devices-up
+    load_config
+
+    case "${AUTO_UP_INTERFACES,,}" in
+        true|yes|1|on) ;;
+        *) log "Automatic interface bring-up is disabled in $CONFIG_FILE."; return 0 ;;
+    esac
+
+    local path iface excluded count=0
+    excluded="${AUTO_UP_EXCLUDE//,/ }"
+    for path in /sys/class/net/*; do
+        [[ -d "$path" ]] || continue
+        iface="${path##*/}"
+        [[ "$iface" == "lo" || "$iface" == "$BRIDGE_IF" ]] && continue
+        [[ -e "$path/device" || -e "$path/phy80211" ]] || continue
+
+        case " $excluded " in
+            *" $iface "*)
+                log "Skipping excluded interface: $iface"
+                continue
+                ;;
+        esac
+
+        if ip link set dev "$iface" up; then
+            success "Interface is up: $iface"
+            count=$((count + 1))
+        else
+            warn "Could not bring interface up: $iface"
+        fi
+    done
+
+    log "Automatic interface bring-up completed ($count interface(s) processed)."
+}
 
 network_up() {
     require_root network-up
@@ -914,6 +978,7 @@ status() {
     fi
 
     printf 'ENRA-managed services (active state and boot setting):\n'
+    service_report "Device bring-up" enra-devices.service
     service_report "Network" enra-network.service
     service_report "Access point (hostapd)" enra-ap.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
@@ -1082,6 +1147,7 @@ validate() {
     fi
 
     printf '\nENRA-managed services:\n'
+    validate_service "Device bring-up" enra-devices.service
     validate_service "Network" enra-network.service
     validate_service "Access point" enra-ap.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
@@ -1097,28 +1163,110 @@ validate() {
     printf 'Run "enra logs" for ENRA service logs.\n'
     return 1
 }
-logs() { journalctl -u enra-network.service -u enra-ap.service -u enra-dnsmasq.service -n 120 --no-pager; }
+logs() { journalctl -u enra-devices.service -u enra-network.service -u enra-ap.service -u enra-dnsmasq.service -n 120 --no-pager; }
 start() {
     require_root start
     load_config
-    systemctl start enra-network.service enra-ap.service
+    systemctl start enra-devices.service enra-network.service enra-ap.service
     [[ "$NETWORK_MODE" != "routed" ]] || systemctl start enra-dnsmasq.service
 }
 stop() {
     require_root stop
     systemctl stop enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
 }
+config() {
+    require_root config
+    [[ -r "$CONFIG_FILE" ]] || die "ENRA is not configured. Run: sudo enra setup"
+
+    local action="${1:-edit}" editor backup
+    case "$action" in
+        show)
+            cat "$CONFIG_FILE"
+            ;;
+        path)
+            printf '%s\n' "$CONFIG_FILE"
+            ;;
+        edit)
+            backup="$CONFIG_FILE.$(date +%Y%m%d%H%M%S).bak"
+            cp -a "$CONFIG_FILE" "$backup"
+
+            if [[ -n "${VISUAL:-${EDITOR:-}}" ]]; then
+                read -r -a editor <<< "${VISUAL:-$EDITOR}"
+                command -v "${editor[0]}" >/dev/null 2>&1 || die "Configured editor was not found: ${editor[0]}"
+                "${editor[@]}" "$CONFIG_FILE"
+            elif command -v nano >/dev/null 2>&1; then
+                nano "$CONFIG_FILE"
+            elif command -v vi >/dev/null 2>&1; then
+                vi "$CONFIG_FILE"
+            else
+                die "No terminal editor found. Set EDITOR or install nano/vi."
+            fi
+
+            if ! bash -n "$CONFIG_FILE"; then
+                cp -a "$backup" "$CONFIG_FILE"
+                die "Invalid shell syntax. The previous configuration was restored from $backup."
+            fi
+            chmod 600 "$CONFIG_FILE"
+            success "Configuration saved. Backup: $backup"
+            warn "Generated hostapd/DNS settings are separate files. Rerun 'sudo enra setup' to rebuild the network configuration."
+            ;;
+        *)
+            die "Usage: sudo enra /config [edit|show|path]"
+            ;;
+    esac
+}
+refresh() {
+    require_root refresh
+    require_systemd
+    load_config
+    command -v hostapd >/dev/null 2>&1 || die "hostapd is missing. Run sudo enra setup."
+    if [[ "$NETWORK_MODE" == "routed" ]]; then
+        command -v dnsmasq >/dev/null 2>&1 || die "dnsmasq is missing. Run sudo enra setup."
+    fi
+
+    install_services
+    systemctl unmask enra-devices.service enra-network.service enra-ap.service
+    if [[ "$NETWORK_MODE" == "routed" ]]; then
+        systemctl unmask enra-dnsmasq.service
+    fi
+    systemctl daemon-reload
+    systemctl enable enra-devices.service enra-network.service enra-ap.service
+    if [[ "$NETWORK_MODE" == "routed" ]]; then
+        systemctl enable enra-dnsmasq.service
+    fi
+    systemctl restart enra-devices.service
+    systemctl restart enra-network.service
+    systemctl restart enra-ap.service
+    if [[ "$NETWORK_MODE" == "routed" ]]; then
+        systemctl restart enra-dnsmasq.service
+    fi
+    success "ENRA service definitions refreshed and services restarted."
+}
+update() {
+    require_root update
+    [[ -x "$UPDATE_SCRIPT" ]] || die "Update helper is missing. Run sudo ./install.sh or sudo ./update.sh from the ENRA repository."
+    exec "$UPDATE_SCRIPT"
+}
 usage() {
     cat <<'EOF'
 ENRA - espress0's Network Routing Architecture
 
 Usage:
-  sudo enra setup     Interactive installation and configuration
-  sudo enra status    Show configuration and service health
-  sudo enra /validate  Check configuration, interfaces, firewall and services
-  sudo enra start     Start ENRA services
-  sudo enra stop      Stop ENRA services
-  sudo enra logs      Show ENRA service logs
+  sudo enra setup       Interactive installation and configuration
+  sudo enra status      Show configuration and service health
+  sudo enra /validate   Check configuration, interfaces, firewall and services
+  sudo enra /config     Edit the main ENRA configuration
+  sudo enra /config show  Print the main ENRA configuration
+  sudo enra update      Download and install the latest GitHub version
+  sudo enra start       Start ENRA services
+  sudo enra stop        Stop ENRA services
+  sudo enra logs        Show ENRA service logs
+
+Automatic interfaces:
+  ENRA brings up detected hardware-backed network interfaces at boot.
+  Set AUTO_UP_INTERFACES=false in /etc/enra/enra.conf to disable it.
+  Set AUTO_UP_EXCLUDE="ens38 wlan1" to leave selected interfaces untouched.
+  This only raises link state; it does not assign IP addresses or DHCP.
 
 Network modes:
   bridge              Bridge Wi-Fi clients to an existing LAN/router
@@ -1140,9 +1288,13 @@ case "$ACTION" in
     setup) setup ;;
     status) status ;;
     validate|/validate) validate ;;
+    config|/config) config "${@:2}" ;;
+    update) update ;;
+    refresh) refresh ;;
     logs) logs ;;
     start) start ;;
     stop) stop ;;
+    devices-up) devices_up ;;
     network-up) network_up ;;
     network-down) network_down ;;
     driver-load) driver_load ;;
