@@ -801,7 +801,7 @@ setup() {
                 "${SEGMENT_GATEWAYS[$i]}" "${SEGMENT_NETWORKS[$i]}"
         done
     fi
-    printf 'ENRA services: enra-network.service, enra-ap.service'
+    printf 'ENRA services: enra-devices.service, enra-network.service, enra-ap.service'
     [[ "$NETWORK_MODE" != "routed" ]] || printf ', enra-dnsmasq.service'
     printf '\nRun "enra status" to inspect service health.\n'
 }
@@ -816,20 +816,26 @@ devices_up() {
         *) log "Automatic interface bring-up is disabled in $CONFIG_FILE."; return 0 ;;
     esac
 
-    local path iface excluded count=0
-    excluded="${AUTO_UP_EXCLUDE//,/ }"
+    local path iface excluded_iface skip count=0
+    local -a excluded_ifaces=()
+    read -r -a excluded_ifaces <<< "${AUTO_UP_EXCLUDE//,/ }"
     for path in /sys/class/net/*; do
         [[ -d "$path" ]] || continue
         iface="${path##*/}"
         [[ "$iface" == "lo" || "$iface" == "$BRIDGE_IF" ]] && continue
         [[ -e "$path/device" || -e "$path/phy80211" ]] || continue
 
-        case " $excluded " in
-            *" $iface "*)
-                log "Skipping excluded interface: $iface"
-                continue
-                ;;
-        esac
+        skip=no
+        for excluded_iface in "${excluded_ifaces[@]}"; do
+            if [[ "$iface" == "$excluded_iface" ]]; then
+                skip=yes
+                break
+            fi
+        done
+        if [[ "$skip" == "yes" ]]; then
+            log "Skipping excluded interface: $iface"
+            continue
+        fi
 
         if ip link set dev "$iface" up; then
             success "Interface is up: $iface"
@@ -1191,7 +1197,7 @@ config() {
             cp -a "$CONFIG_FILE" "$backup"
 
             if [[ -n "${VISUAL:-${EDITOR:-}}" ]]; then
-                read -r -a editor <<< "${VISUAL:-$EDITOR}"
+                read -r -a editor <<< "${VISUAL:-${EDITOR:-}}"
                 command -v "${editor[0]}" >/dev/null 2>&1 || die "Configured editor was not found: ${editor[0]}"
                 "${editor[@]}" "$CONFIG_FILE"
             elif command -v nano >/dev/null 2>&1; then
@@ -1233,6 +1239,8 @@ refresh() {
     systemctl enable enra-devices.service enra-network.service enra-ap.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         systemctl enable enra-dnsmasq.service
+    else
+        systemctl disable enra-dnsmasq.service >/dev/null 2>&1 || true
     fi
     systemctl restart enra-devices.service
     systemctl restart enra-network.service
