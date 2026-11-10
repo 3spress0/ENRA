@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly ENRA_VERSION="0.2.3"
+readonly ENRA_VERSION="0.2.4"
 readonly CONFIG_DIR="/etc/enra"
 readonly CONFIG_FILE="$CONFIG_DIR/enra.conf"
 readonly HOSTAPD_FILE="$CONFIG_DIR/hostapd.conf"
@@ -308,9 +308,11 @@ PY
 )" || die "Invalid routed network values."
         ip route show "$AP_NETWORK" 2>/dev/null | grep -q . &&
             die "AP subnet overlaps a route already present on this machine."
-        systemctl is-active --quiet dnsmasq.service &&
+        if systemctl is-active --quiet dnsmasq.service; then
             die "The system dnsmasq.service is active. Resolve that DNS/DHCP conflict before choosing routed mode."
+        fi
     fi
+    return 0
 }
 
 configure_radio() {
