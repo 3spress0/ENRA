@@ -2,47 +2,84 @@
 
 **espress0's Network Routing Architecture**
 
-ENRA is a Debian-based network infrastructure project. Its initial component turns a Debian virtual machine into a wireless access point bridged to an OPNsense network.
+ENRA is a configurable Linux access-point and network-edge utility built around hostapd, Linux networking and systemd. It adapts to different Linux distributions, wireless adapters, radio settings and network topologies.
 
-## Architecture
+## Features
+
+- Interactive setup with wireless hardware and interface discovery.
+- Layer 2 bridge or routed/NAT access-point modes.
+- WPA3-Personal (SAE), WPA2-Personal and WPA2/WPA3 transition security profiles.
+- Configurable SSID, regulatory country, radio band, channel and upstream interface.
+- Uses an existing kernel driver where available; it does not assume every adapter is Realtek.
+- Optional RTL8821AU DKMS installation when USB ID **0bda:0811** is detected and no wireless interface exists.
+- systemd services for startup and recovery.
+- Credentials stored in root-only files under **/etc/enra**.
+
+## Supported platforms
+
+ENRA targets systemd-based Linux distributions using these package families:
+
+| Package family | Distribution families |
+|---|---|
+| APT | Debian, Ubuntu and derivatives |
+| DNF | Fedora, RHEL, Rocky Linux, AlmaLinux and derivatives |
+| Pacman | Arch Linux, Manjaro, EndeavourOS and derivatives |
+| Zypper | openSUSE |
+
+Package-manager support does not mean every release or kernel has been tested. The wireless chipset must have a working Linux driver that exposes AP mode through nl80211. WPA3 also requires compatible hostapd, driver, firmware and client support.
+
+Non-systemd distributions, OpenWrt, BSD, Windows, macOS, and distributions without one of the package families above are not currently supported by this installer.
+
+## Network modes
+
+### Bridge mode
+
+Wireless clients join an existing Ethernet LAN. The upstream router remains responsible for DHCP, DNS, routing, NAT and firewall policy. Use this mode when ENRA is an access point behind OPNsense or another router.
 
 ~~~text
-                         Internet
-                            |
-                     VMware NAT (WAN)
-                            |
-                        OPNsense
-                            |
-                  Dedicated LAN Segment
-                            |
-                 Debian VM - ENRA bridge
-                            |
-                   br-enra (Layer 2)
-                      /         \
-             VMware NIC       USB Wi-Fi
-             (wired port)       hostapd
-                                   |
-                           Wireless clients
+Wi-Fi clients
+     |
+   hostapd
+     |
+  br-enra
+     |
+ Ethernet interface
+     |
+ Existing router / firewall
+ (DHCP, DNS, routing and policy)
 ~~~
 
-OPNsense remains the router and firewall. It provides DHCP, routing, NAT and firewall policy. Debian only bridges Ethernet and Wi-Fi at Layer 2; ENRA does not run a DHCP server, enable IP forwarding, or configure NAT.
+The selected Ethernet interface becomes a bridge port and must not retain its own IP address. Choose a dedicated interface that is not carrying the Linux host's management/default route.
 
-Keep the Debian VM's VMware NAT adapter separate. The interface selected during setup must be the Debian virtual NIC connected to the same dedicated VMware LAN Segment as the relevant OPNsense LAN interface.
+### Routed mode
 
-## Current target
+ENRA creates a separate IPv4 subnet on the Wi-Fi interface. It configures a gateway address, dnsmasq for DHCP/DNS forwarding, IP forwarding and nftables masquerading through an upstream interface.
 
-- Debian 13 minimal, systemd-based.
-- VMware Workstation virtual machine.
-- Realtek USB Wi-Fi adapter: **0bda:0811 (RTL8821AU)**.
-- hostapd with WPA3-Personal (SAE), AES/CCMP and mandatory Protected Management Frames (PMF).
-- SSID default: **espers cool network**.
-- Regulatory domain: Netherlands (**NL**).
-- 2.4 GHz channel: 6.
-- OPNsense owns DHCP, routing, NAT and firewalling.
+~~~text
+Wi-Fi clients
+     |
+   hostapd
+     |
+  AP subnet
+     |
+ dnsmasq + nftables
+     |
+ Upstream interface
+     |
+ Existing router / Internet
+~~~
+
+Defaults are **10.42.0.1/24**, DHCP **10.42.0.50-10.42.0.200**, and upstream DNS **1.1.1.1**. Change these during setup. Confirm that the AP subnet does not overlap with upstream LAN or VPN routes.
+
+## Wireless security
+
+- **WPA3-Personal:** SAE with mandatory Protected Management Frames (PMF).
+- **WPA2-Personal:** PSK with AES/CCMP.
+- **Transition mode:** WPA2-PSK and WPA3-SAE together for older clients.
+
+WPA3 is the default. Linux alone does not guarantee WPA3 AP support. The adapter driver, firmware, hostapd build and clients must all support the selected mode. ENRA checks AP mode; service logs show hostapd errors.
 
 ## Installation
-
-Connect the Realtek USB adapter to the Debian VM using VMware's **Removable Devices** menu, then clone this repository:
 
 ~~~bash
 git clone https://github.com/3spress0/ENRA.git
@@ -50,41 +87,55 @@ cd ENRA
 sudo ./enra.sh setup
 ~~~
 
-The setup is interactive. It installs the required packages and driver, detects the wireless interface, and asks which wired interface connects to the OPNsense LAN Segment.
+Setup installs hostapd and wireless tools using the detected package manager. It discovers wireless interfaces, checks that the selected interface advertises AP mode, and asks for topology, interfaces, radio settings and security profile.
 
-**Select only the dedicated OPNsense LAN Segment interface. Do not select the VMware NAT interface or the interface carrying Debian's default route.** ENRA rejects interfaces with a default route, a configured global IP address, an ifupdown stanza, or an existing bridge master. Before continuing, confirm that NetworkManager, systemd-networkd, or another DHCP client does not manage the selected interface.
+### Existing Debian + RTL8821AU + OPNsense setup
 
-The installer asks for the SSID and WPA3 passphrase. The passphrase is stored in /etc/enra/hostapd.conf, which is readable only by root. If the installed hostapd or wireless driver rejects WPA3, the access-point service will fail and its journal will contain the reason.
+Choose:
 
-If matching headers for the currently running kernel are unavailable, the installer installs Debian's kernel and header metapackages and stops. Reboot, return to this directory, and run the setup command again.
+- Network mode: **bridge**
+- Wi-Fi adapter: the Realtek USB adapter's wireless interface
+- Wired bridge port: the Debian VM interface connected to the same VMware LAN Segment as the OPNsense LAN
+- Country: **NL**
+- Band: **2.4 GHz**
+- Channel: **6**
+- Security: **WPA3-Personal**
+
+Do not select the Debian VMware NAT interface as the bridge port. In bridge mode, OPNsense provides DHCP and network policy for the LAN Segment.
+
+### Driver handling
+
+ENRA uses an existing wireless interface and its kernel driver when one is available. It does not replace a working driver.
+
+If no wireless interface exists but USB ID **0bda:0811** is detected, setup tries the in-kernel **rtw88_8821au** module and then offers the out-of-tree RTL8821AU driver using DKMS. This is a targeted fallback, not a universal driver installer. For other adapters, install the correct driver and firmware through your distribution, verify the interface with **iw dev**, and rerun ENRA.
+
+The RTL8821AU maintainers recommend an in-kernel driver where available on modern kernels. See the [upstream README](https://github.com/morrownr/8821au-20210708) and [supported USB IDs](https://github.com/morrownr/8821au-20210708/blob/main/supported-device-IDs) before using the external driver.
 
 ## Commands
 
+After setup, the command is installed as **/usr/local/sbin/enra**:
+
 ~~~bash
-sudo ./enra.sh status
-sudo ./enra.sh start
-sudo ./enra.sh stop
-sudo ./enra.sh logs
+sudo enra status
+sudo enra start
+sudo enra stop
+sudo enra logs
 ~~~
 
-The bridge and access point are installed as **enra-bridge.service** and **enra-ap.service**, and are enabled at boot.
+ENRA uses **enra-network.service** and **enra-ap.service**. Routed mode also uses **enra-dnsmasq.service**. Services are enabled during setup and start on boot.
 
-## Driver
+## Configuration and limitations
 
-The RTL8821AU driver source is obtained from [morrownr/8821au-20210708](https://github.com/morrownr/8821au-20210708). Its supported USB device list includes 0bda:0811; the driver documents hostapd and AP-mode support.
+- Main configuration: **/etc/enra/enra.conf**.
+- hostapd credentials: **/etc/enra/hostapd.conf** (root-only).
+- Routed DHCP/DNS configuration: **/etc/enra/dnsmasq.conf** (root-only).
+- Configures 2.4 GHz and 5 GHz hostapd profiles. Actual channels depend on country, adapter and driver.
+- Routed mode currently provides IPv4 DHCP and NAT. IPv6 forwarding/firewalling is not configured.
+- VLANs, 802.1X/RADIUS, captive portals, mesh, multi-AP roaming, per-client isolation and automatic channel selection are not implemented.
+- Bridge mode exposes the LAN according to the upstream router's policy; it does not create a guest-network security boundary.
+- Routed mode adds an nftables forward chain and NAT rules for the ENRA AP subnet. Review existing firewall policies before enabling it.
+- Selected interfaces should not simultaneously be managed by another network manager or DHCP client. Check NetworkManager, systemd-networkd and ifupdown configuration before setup.
 
-The installer uses the in-kernel rtw88_8821au module when it is available and advertises the adapter ID. Otherwise it builds the upstream 8821au driver with DKMS. For the Debian 13 kernel-header build issue reported upstream, ENRA applies the documented _FW_UNDER_SURVEY to WIFI_UNDER_SURVEY source fix before DKMS compilation. See [upstream issue #202](https://github.com/morrownr/8821au-20210708/issues/202).
+## Development status
 
-## Important network behaviour
-
-- The ENRA bridge has no IP address by design.
-- Wireless clients receive their network configuration from OPNsense.
-- Debian's other VMware NICs are left unchanged.
-- ENRA does not create firewall rules or provide isolation between wireless clients and the OPNsense LAN. Apply the required policy on OPNsense.
-- A bridge connects clients to the Layer 2 network attached to the selected VMware LAN Segment. Verify the OPNsense interface and DHCP scope are configured for that same segment.
-
-## Security
-
-Use a unique WPA2 passphrase. The passphrase is stored locally in a root-only hostapd configuration file and must never be committed to this repository.
-
-The initial release uses WPA3-Personal only (SAE). It requires client support for WPA3 and Protected Management Frames. WPA2 compatibility mode is not enabled.
+ENRA is an early release. It has not been tested across all listed package families, kernels, adapters, security modes or network topologies. Issue reports should include distribution, kernel version, adapter chipset/USB ID, driver, network mode and relevant service logs.
