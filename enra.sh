@@ -402,6 +402,7 @@ configure_interfaces() {
     SEGMENT_DHCP_STARTS+=("$start")
     SEGMENT_DHCP_ENDS+=("$end")
 
+    printf '\\nEach Ethernet segment needs a dedicated interface and receives its own isolated IPv4 subnet.\\n'
     read -r -p "Additional Ethernet LAN segments [0]: " segment_count
     segment_count="${segment_count:-0}"
     [[ "$segment_count" =~ ^(0|[1-9][0-9]*)$ ]] || die "Enter a whole number of additional Ethernet segments."
@@ -1117,7 +1118,7 @@ Usage:
 
 Network modes:
   bridge              Bridge Wi-Fi clients to an existing LAN/router
-  routed              Create a separate IPv4 subnet with DHCP and NAT
+  routed              Create isolated IPv4 segments with DHCP and NAT
 
 Security:
   WPA3-Personal       SAE with required PMF
