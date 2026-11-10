@@ -27,7 +27,7 @@ download() {
     fi
 }
 
-if [[ -f "$SCRIPT_DIR/enra.sh" && -f "$SCRIPT_DIR/update.sh" ]]; then
+if [[ -n "${BASH_SOURCE[0]:-}" && -f "$SCRIPT_DIR/enra.sh" && -f "$SCRIPT_DIR/update.sh" ]]; then
     cp "$SCRIPT_DIR/enra.sh" "$TEMP_DIR/enra.sh"
     cp "$SCRIPT_DIR/update.sh" "$TEMP_DIR/update.sh"
 else
