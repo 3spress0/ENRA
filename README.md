@@ -4,6 +4,22 @@
 
 ENRA is a configurable Linux access-point and network-edge utility built around hostapd, nl80211, Linux networking and systemd. It supports multiple package families, wireless adapters with Linux AP-mode support, radio settings, security profiles and two common network topologies. Adapter driver installation is deliberately separate from AP configuration: ENRA will not guess and replace arbitrary third-party drivers.
 
+## TL;DR - Quickstart
+
+```bash
+git clone https://github.com/3spress0/ENRA.git
+cd ENRA
+sudo ./enra.sh setup
+```
+
+Setup is interactive. Choose **bridge** when an existing router handles DHCP and firewalling, or **routed** when ENRA should provide a separate IPv4 network with DHCP and NAT. WPA3-Personal is the default, but requires compatible Wi-Fi hardware, drivers, firmware and clients.
+
+After setup:
+
+```bash
+sudo enra status
+```
+
 ## Features
 
 - Interactive setup with wireless hardware and interface discovery.
@@ -79,13 +95,7 @@ Defaults are **10.42.0.1/24**, DHCP **10.42.0.50-10.42.0.200**, and upstream DNS
 
 WPA3 is the default. Linux alone does not guarantee WPA3 AP support. The adapter driver, firmware, hostapd build and clients must all support the selected mode. ENRA checks AP mode; service logs show hostapd errors.
 
-## Installation
-
-~~~bash
-git clone https://github.com/3spress0/ENRA.git
-cd ENRA
-sudo ./enra.sh setup
-~~~
+## Setup behavior
 
 Setup detects the package manager, installs hostapd and wireless tools, discovers wireless interfaces and verifies AP mode. It then asks for network topology, interfaces, radio settings and security profile. It marks selected interfaces unmanaged in NetworkManager and systemd-networkd where those services are active. If ifupdown has an explicit stanza for a bridge port, setup stops rather than silently rewriting it.
 
