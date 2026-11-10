@@ -674,6 +674,20 @@ After=enra-network.service
 Type=oneshot
 ExecStart=/usr/local/sbin/enra hotplug-add %I
 EOF
+    cat > /etc/systemd/system/enra-hotplug-scan.service <<'EOF'
+[Unit]
+Description=ENRA scan for unassigned Ethernet interfaces
+Requires=enra-network.service enra-ap.service
+After=enra-network.service enra-ap.service enra-dnsmasq.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/enra hotplug-scan
+
+[Install]
+WantedBy=multi-user.target
+EOF
     install -d -m 0755 /etc/udev/rules.d
     cat > /etc/udev/rules.d/90-enra-hotplug.rules <<'EOF'
 ACTION=="add", SUBSYSTEM=="net", KERNEL!="lo", TAG+="systemd", ENV{SYSTEMD_WANTS}+="enra-hotplug@%k.service"
@@ -791,7 +805,7 @@ setup() {
     fi
     systemctl daemon-reload
     log "Enabling ENRA services..."
-    systemctl enable enra-devices.service enra-network.service enra-ap.service
+    systemctl enable enra-devices.service enra-network.service enra-ap.service enra-hotplug-scan.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         systemctl enable enra-dnsmasq.service
     else
@@ -812,7 +826,12 @@ setup() {
             journalctl -u enra-dnsmasq.service -n 60 --no-pager || true
             die "ENRA DHCP/DNS service failed."
         }
+    else
+        systemctl disable enra-dnsmasq.service >/dev/null 2>&1 || true
     fi
+    log "Scanning for additional Ethernet interfaces..."
+    systemctl restart enra-hotplug-scan.service ||
+        warn "Automatic NIC scan failed. Inspect journalctl -u enra-hotplug-scan.service."
     success "ENRA setup completed."
     printf 'Mode: %s\nWireless interface: %s\nSSID: %s\nBand/channel: %s GHz / %s\nSecurity: %s\n' \
         "$NETWORK_MODE" "$WIFI_IF" "$SSID" "$BAND" "$CHANNEL" "$SECURITY"
@@ -1049,9 +1068,76 @@ hotplug_add() {
         "$gateway" "$prefix" "$network" "$dhcp_start" "$dhcp_end"
 }
 
+scan_new_interfaces() {
+    require_root hotplug-scan
+    load_config
+    case "${AUTO_ADD_INTERFACES,,}" in
+        true|yes|1|on) ;;
+        *) log "Automatic NIC integration is disabled in $CONFIG_FILE."; return 0 ;;
+    esac
+    [[ "$NETWORK_MODE" == "routed" ]] || {
+        log "Automatic NIC integration is only enabled in routed mode."
+        return 0
+    }
+
+    local path iface
+    for path in /sys/class/net/*; do
+        [[ -d "$path" ]] || continue
+        iface="${path##*/}"
+        hotplug_add "$iface"
+    done
+}
+
+prune_missing_segments() {
+    [[ "$NETWORK_MODE" == "routed" ]] || return 0
+
+    local i iface removed=no
+    local -a keep_ifaces=() keep_names=() keep_gateways=() keep_prefixes=()
+    local -a keep_networks=() keep_dhcp_starts=() keep_dhcp_ends=()
+
+    for ((i = 0; i < ${#SEGMENT_IFACES[@]}; i++)); do
+        iface="${SEGMENT_IFACES[$i]}"
+        if [[ ! -d "/sys/class/net/$iface" ]]; then
+            if [[ "$iface" == "$WIFI_IF" ]]; then
+                die "Configured Wi-Fi interface is missing: $iface"
+            fi
+            warn "Removing disconnected ENRA segment from saved configuration: $iface"
+            rm -f "/etc/systemd/network/00-enra-$iface.network"
+            removed=yes
+            continue
+        fi
+        keep_ifaces+=("$iface")
+        keep_names+=("${SEGMENT_NAMES[$i]}")
+        keep_gateways+=("${SEGMENT_GATEWAYS[$i]}")
+        keep_prefixes+=("${SEGMENT_PREFIXES[$i]}")
+        keep_networks+=("${SEGMENT_NETWORKS[$i]}")
+        keep_dhcp_starts+=("${SEGMENT_DHCP_STARTS[$i]}")
+        keep_dhcp_ends+=("${SEGMENT_DHCP_ENDS[$i]}")
+    done
+
+    if [[ "$removed" == "yes" ]]; then
+        SEGMENT_IFACES=("${keep_ifaces[@]}")
+        SEGMENT_NAMES=("${keep_names[@]}")
+        SEGMENT_GATEWAYS=("${keep_gateways[@]}")
+        SEGMENT_PREFIXES=("${keep_prefixes[@]}")
+        SEGMENT_NETWORKS=("${keep_networks[@]}")
+        SEGMENT_DHCP_STARTS=("${keep_dhcp_starts[@]}")
+        SEGMENT_DHCP_ENDS=("${keep_dhcp_ends[@]}")
+        AP_GATEWAY="${SEGMENT_GATEWAYS[0]}"
+        AP_PREFIX="${SEGMENT_PREFIXES[0]}"
+        AP_NETWORK="${SEGMENT_NETWORKS[0]}"
+        DHCP_START="${SEGMENT_DHCP_STARTS[0]}"
+        DHCP_END="${SEGMENT_DHCP_ENDS[0]}"
+        save_main_config
+        write_dnsmasq_config
+        log "Saved network configuration reconciled with connected Ethernet interfaces."
+    fi
+}
+
 network_up() {
     require_root network-up
     load_config
+    prune_missing_segments
     if [[ "$NETWORK_MODE" == "bridge" ]]; then
         ip link show dev "$WIFI_IF" >/dev/null 2>&1 || die "Wireless interface not found: $WIFI_IF"
         ip link show dev "$UPLINK_IF" >/dev/null 2>&1 || die "Bridge uplink not found: $UPLINK_IF"
@@ -1186,6 +1272,7 @@ status() {
 
     printf 'ENRA-managed services (active state and boot setting):\n'
     service_report "Device bring-up" enra-devices.service
+    service_report "NIC integration scan" enra-hotplug-scan.service
     service_report "Network" enra-network.service
     service_report "Access point (hostapd)" enra-ap.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
@@ -1355,6 +1442,7 @@ validate() {
 
     printf '\nENRA-managed services:\n'
     validate_service "Device bring-up" enra-devices.service
+    validate_service "NIC integration scan" enra-hotplug-scan.service
     validate_service "Network" enra-network.service
     validate_service "Access point" enra-ap.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
@@ -1379,7 +1467,7 @@ start() {
 }
 stop() {
     require_root stop
-    systemctl stop enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
+    systemctl stop enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
 }
 config() {
     require_root config
@@ -1437,7 +1525,7 @@ refresh() {
         systemctl unmask enra-dnsmasq.service
     fi
     systemctl daemon-reload
-    systemctl enable enra-devices.service enra-network.service enra-ap.service
+    systemctl enable enra-devices.service enra-network.service enra-ap.service enra-hotplug-scan.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         systemctl enable enra-dnsmasq.service
     else
@@ -1449,6 +1537,8 @@ refresh() {
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         systemctl restart enra-dnsmasq.service
     fi
+    systemctl restart enra-hotplug-scan.service ||
+        warn "Automatic NIC scan failed. Inspect journalctl -u enra-hotplug-scan.service."
     success "ENRA service definitions refreshed and services restarted."
 }
 update() {
@@ -1508,6 +1598,7 @@ case "$ACTION" in
     stop) stop ;;
     devices-up) devices_up ;;
     hotplug-add) hotplug_add "${@:2}" ;;
+    hotplug-scan) scan_new_interfaces ;;
     network-up) network_up ;;
     network-down) network_down ;;
     driver-load) driver_load ;;
