@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly ENRA_VERSION="0.2.4"
+readonly ENRA_VERSION="0.2.5"
 readonly CONFIG_DIR="/etc/enra"
 readonly CONFIG_FILE="$CONFIG_DIR/enra.conf"
 readonly HOSTAPD_FILE="$CONFIG_DIR/hostapd.conf"
@@ -355,18 +355,18 @@ configure_security() {
 }
 
 write_configuration() {
-    local ssid_bytes ssid_hex
+    local ssid_bytes
     read -r -p "Wi-Fi network name [espers cool network]: " SSID
     SSID="${SSID:-espers cool network}"
     ssid_bytes="$(LC_ALL=C printf '%s' "$SSID" | wc -c)"
     [[ "$ssid_bytes" -ge 1 && "$ssid_bytes" -le 32 ]] || die "SSID must contain 1-32 bytes."
     [[ "$SSID" =~ ^[[:print:]]+$ ]] || die "SSID must contain printable ASCII characters."
-    ssid_hex="$(printf '%s' "$SSID" | od -An -tx1 | tr -d ' \n')"
+    SSID_HEX="$(printf '%s' "$SSID" | od -An -tx1 | tr -d ' \n')"
     mkdir -p "$CONFIG_DIR"
     chmod 700 "$CONFIG_DIR"
     {
         printf 'NETWORK_MODE=%q\nWIFI_IF=%q\nUPLINK_IF=%q\nSSID=%q\nSSID_HEX=%q\n' \
-            "$NETWORK_MODE" "$WIFI_IF" "$UPLINK_IF" "$SSID" "$ssid_hex"
+            "$NETWORK_MODE" "$WIFI_IF" "$UPLINK_IF" "$SSID" "$SSID_HEX"
         printf 'COUNTRY_CODE=%q\nBAND=%q\nCHANNEL=%q\nSECURITY=%q\n' "$COUNTRY_CODE" "$BAND" "$CHANNEL" "$SECURITY"
         printf 'AP_GATEWAY=%q\nAP_PREFIX=%q\nAP_NETWORK=%q\n' "$AP_GATEWAY" "$AP_PREFIX" "$AP_NETWORK"
         printf 'DHCP_START=%q\nDHCP_END=%q\nDNS_UPSTREAM=%q\nDRIVER_MODULE=%q\n' \
