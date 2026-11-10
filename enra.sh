@@ -745,6 +745,7 @@ WantedBy=multi-user.target
 EOF
     fi
     systemctl daemon-reload
+    udevadm control --reload-rules 2>/dev/null || true
 }
 
 setup() {
