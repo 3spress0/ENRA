@@ -130,7 +130,20 @@ discover_driver() {
     local usb_list="$1"
     if [[ -n "$(wireless_list)" ]]; then return 0; fi
     if [[ "$usb_list" == *"0bda:0811"* ]]; then
+        case "$PACKAGE_MANAGER" in
+            apt)
+                if [[ "$DISTRO_ID" == "debian" ]]; then
+                    apt-get install -y firmware-realtek || warn "firmware-realtek could not be installed; verify Debian non-free-firmware is enabled."
+                else
+                    apt-get install -y linux-firmware || warn "linux-firmware could not be installed automatically."
+                fi
+                ;;
+            dnf) dnf install -y linux-firmware || warn "linux-firmware could not be installed automatically." ;;
+            pacman) pacman -S --needed --noconfirm linux-firmware || warn "linux-firmware could not be installed automatically." ;;
+            zypper) zypper --non-interactive install kernel-firmware-realtek || warn "Realtek firmware package could not be installed automatically." ;;
+        esac
         modprobe rtw88_8821au >/dev/null 2>&1 || true
+        modprobe 8821au >/dev/null 2>&1 || true
         sleep 2
         if [[ -n "$(wireless_list)" ]]; then return 0; fi
         warn "RTL8821AU USB adapter detected, but no wireless interface appeared."
@@ -357,6 +370,35 @@ EOF
     nmcli device set "$WIFI_IF" managed no >/dev/null 2>&1 || true
 }
 
+configure_networkd_unmanaged() {
+    systemctl is-active --quiet systemd-networkd.service || return 0
+    mkdir -p /etc/systemd/network
+    local iface
+    for iface in "$WIFI_IF"; do
+        cat > "/etc/systemd/network/00-enra-$iface.network" <<EOF
+[Match]
+Name=$iface
+
+[Link]
+Unmanaged=yes
+EOF
+    done
+    if [[ "$NETWORK_MODE" == "bridge" ]]; then
+        for iface in "$UPLINK_IF" "$BRIDGE_IF"; do
+            cat > "/etc/systemd/network/00-enra-$iface.network" <<EOF
+[Match]
+Name=$iface
+
+[Link]
+Unmanaged=yes
+EOF
+        done
+    fi
+    networkctl reload
+    networkctl reconfigure "$WIFI_IF" >/dev/null 2>&1 || true
+    [[ "$NETWORK_MODE" != "bridge" ]] || networkctl reconfigure "$UPLINK_IF" >/dev/null 2>&1 || true
+}
+
 install_services() {
     local hostapd_bin dnsmasq_bin
     hostapd_bin="$(command -v hostapd)"
@@ -438,6 +480,7 @@ setup() {
     configure_security
     write_configuration
     configure_network_manager
+    configure_networkd_unmanaged
     install_services
     systemctl enable enra-network.service enra-ap.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
