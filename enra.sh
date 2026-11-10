@@ -732,11 +732,11 @@ validate_service() {
     if [[ "$active" == "active" ]]; then
         validate_check pass "$label service is active."
     else
-        validate_check fail "$label service is \${active:-unknown}. Inspect: journalctl -u $unit -n 60 --no-pager"
+        validate_check fail "$label service is ${{active:-unknown}. Inspect: journalctl -u $unit -n 60 --no-pager"
     fi
     case "$enabled" in
         enabled|enabled-runtime) validate_check pass "$label service is enabled at boot." ;;
-        *) validate_check fail "$label service is not enabled at boot (state: \${enabled:-unknown})." ;;
+        *) validate_check fail "$label service is not enabled at boot (state: ${{enabled:-unknown})." ;;
     esac
 }
 
@@ -756,23 +756,23 @@ validate() {
     # shellcheck source=/etc/enra/enra.conf
     source "$CONFIG_FILE"
 
-    NETWORK_MODE="\${NETWORK_MODE:-}"
-    WIFI_IF="\${WIFI_IF:-}"
-    UPLINK_IF="\${UPLINK_IF:-}"
-    AP_GATEWAY="\${AP_GATEWAY:-}"
-    AP_PREFIX="\${AP_PREFIX:-}"
-    AP_NETWORK="\${AP_NETWORK:-}"
+    NETWORK_MODE="${{NETWORK_MODE:-}"
+    WIFI_IF="${{WIFI_IF:-}"
+    UPLINK_IF="${{UPLINK_IF:-}"
+    AP_GATEWAY="${{AP_GATEWAY:-}"
+    AP_PREFIX="${{AP_PREFIX:-}"
+    AP_NETWORK="${{AP_NETWORK:-}"
 
     local item
     for item in NETWORK_MODE WIFI_IF UPLINK_IF SSID SSID_HEX COUNTRY_CODE BAND CHANNEL SECURITY; do
-        [[ -n "\${!item:-}" ]] &&
+        [[ -n "${{!item:-}" ]] &&
             validate_check pass "Configuration value $item is present." ||
             validate_check fail "Configuration value $item is missing."
     done
 
     case "$NETWORK_MODE" in
         bridge|routed) validate_check pass "Network mode is $NETWORK_MODE." ;;
-        *) validate_check fail "Invalid network mode: \${NETWORK_MODE:-unset}." ;;
+        *) validate_check fail "Invalid network mode: ${{NETWORK_MODE:-unset}." ;;
     esac
 
     for item in ip iw hostapd systemctl; do
@@ -786,70 +786,19 @@ validate() {
         supports_ap_mode "$WIFI_IF" &&
             validate_check pass "$WIFI_IF advertises AP mode." ||
             validate_check fail "$WIFI_IF does not advertise AP mode."
-        if iw dev "$WIFI_IF" info 2>/dev/null | grep -qE '^[[:space:]]*type APstart() {
-    require_root start
-    load_config
-    systemctl start enra-network.service enra-ap.service
-    [[ "$NETWORK_MODE" != "routed" ]] || systemctl start enra-dnsmasq.service
-}
-stop() {
-    require_root stop
-    systemctl stop enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
-}
-usage() {
-    cat <<'EOF'
-ENRA - espress0's Network Routing Architecture
-
-Usage:
-  sudo enra setup     Interactive installation and configuration
-  sudo enra status    Show configuration and service health
-  sudo enra /validate  Check configuration, interfaces, firewall and services
-  sudo enra start     Start ENRA services
-  sudo enra stop      Stop ENRA services
-  sudo enra logs      Show ENRA service logs
-
-Network modes:
-  bridge              Bridge Wi-Fi clients to an existing LAN/router
-  routed              Create a separate IPv4 subnet with DHCP and NAT
-
-Security:
-  WPA3-Personal       SAE with required PMF
-  WPA2-Personal       PSK with AES/CCMP
-  Transition          WPA2/WPA3 mixed authentication
-
-Supported package families: Debian/Ubuntu, Fedora/RHEL, Arch and openSUSE.
-systemd and a wireless driver with AP-mode support are required.
-EOF
-}
-
-SELF_PATH="$(readlink -f "$0")"
-ACTION="${1:-help}"
-case "$ACTION" in
-    setup) setup ;;
-    status) status ;;
-    validate|/validate) validate ;;
-    logs) logs ;;
-    start) start ;;
-    stop) stop ;;
-    network-up) network_up ;;
-    network-down) network_down ;;
-    driver-load) driver_load ;;
-    help|-h|--help) usage ;;
-    *) usage; die "Unknown command: $ACTION" ;;
-esac
-; then
+        if iw dev "$WIFI_IF" info 2>/dev/null | grep -qE '^[[:space:]]*type AP$'; then
             validate_check pass "$WIFI_IF is operating in AP mode."
         else
             validate_check warn "$WIFI_IF is not currently in AP mode. Check enra-ap.service."
         fi
     else
-        validate_check fail "Wireless interface is missing: \${WIFI_IF:-unset}."
+        validate_check fail "Wireless interface is missing: ${{WIFI_IF:-unset}."
     fi
 
     if [[ -n "$UPLINK_IF" ]] && ip link show dev "$UPLINK_IF" >/dev/null 2>&1; then
         validate_check pass "Upstream interface exists: $UPLINK_IF."
     else
-        validate_check fail "Upstream interface is missing: \${UPLINK_IF:-unset}."
+        validate_check fail "Upstream interface is missing: ${{UPLINK_IF:-unset}."
     fi
 
     [[ -s "$HOSTAPD_FILE" ]] &&
@@ -858,7 +807,7 @@ esac
 
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         for item in AP_GATEWAY AP_PREFIX AP_NETWORK DHCP_START DHCP_END DNS_UPSTREAM; do
-            [[ -n "\${!item:-}" ]] &&
+            [[ -n "${{!item:-}" ]] &&
                 validate_check pass "Routed setting $item is present." ||
                 validate_check fail "Routed setting $item is missing."
         done
@@ -878,7 +827,7 @@ esac
            ip -4 -o address show dev "$WIFI_IF" 2>/dev/null | awk '{print $4}' | grep -Fxq "$AP_GATEWAY/$AP_PREFIX"; then
             validate_check pass "AP gateway address $AP_GATEWAY/$AP_PREFIX is assigned."
         else
-            validate_check fail "AP gateway address is not assigned to \${WIFI_IF:-the wireless interface}."
+            validate_check fail "AP gateway address is not assigned to ${{WIFI_IF:-the wireless interface}."
         fi
 
         [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)" == "1" ]] &&
@@ -935,6 +884,7 @@ ENRA - espress0's Network Routing Architecture
 Usage:
   sudo enra setup     Interactive installation and configuration
   sudo enra status    Show configuration and service health
+  sudo enra /validate  Check configuration, interfaces, firewall and services
   sudo enra start     Start ENRA services
   sudo enra stop      Stop ENRA services
   sudo enra logs      Show ENRA service logs
@@ -958,6 +908,7 @@ ACTION="${1:-help}"
 case "$ACTION" in
     setup) setup ;;
     status) status ;;
+    validate|/validate) validate ;;
     logs) logs ;;
     start) start ;;
     stop) stop ;;
