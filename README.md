@@ -87,7 +87,7 @@ Wi-Fi clients
  Existing router / Internet
 ~~~
 
-Defaults are **10.42.0.1/24**, DHCP **10.42.0.50-10.42.0.200**, and upstream DNS **1.1.1.1**. Change these during setup. Confirm that the AP subnet does not overlap with upstream LAN or VPN routes.
+Defaults are **10.42.0.1/24**, DHCP **10.42.0.50-10.42.0.200**, and upstream DNS **1.1.1.1**. Change these during setup. Confirm that the AP subnet does not overlap with upstream LAN or VPN routes. AP clients can initiate connections upstream; unsolicited connections from the upstream network to AP clients are blocked, while established return traffic is allowed.
 
 ## Wireless security
 
@@ -134,13 +134,15 @@ sudo enra stop
 sudo enra logs
 ~~~
 
-ENRA uses **enra-network.service** and **enra-ap.service**. Routed mode also uses **enra-dnsmasq.service**. Services are enabled during setup and start on boot.
+Use **`enra status`** to inspect the ENRA-owned service units, startup state, network addresses, wireless mode and recent logs. Checking `systemctl status hostapd` or `systemctl status dnsmasq` does not show ENRA service health.
+
+ENRA uses its own systemd units: **enra-network.service** and **enra-ap.service**. Routed mode also uses **enra-dnsmasq.service**. Services are enabled during setup and start on boot. The installer starts these units directly and does not depend on the distribution-provided **hostapd.service** or **dnsmasq.service**. On Debian, **hostapd.service** may be masked by the package and **dnsmasq-base** may not provide a **dnsmasq.service** unit; neither condition prevents ENRA from working. Do not unmask or start the distribution units to operate ENRA.
 
 ## Configuration and limitations
 
 - Main configuration: **/etc/enra/enra.conf**.
 - hostapd credentials: **/etc/enra/hostapd.conf** (root-only).
-- Routed DHCP/DNS configuration: **/etc/enra/dnsmasq.conf** (root-only).
+- Routed DHCP/DNS configuration: **/etc/enra/dnsmasq.conf** (root-only). ENRA intentionally stores these files under `/etc/enra`; it does not use `/etc/hostapd` or `/etc/dnsmasq.d`.
 - Configures 2.4 GHz and 5 GHz hostapd profiles. Actual channels depend on country, adapter and driver.
 - Routed mode currently provides IPv4 DHCP and NAT. IPv6 forwarding/firewalling is not configured.
 - VLANs, 802.1X/RADIUS, captive portals, mesh, multi-AP roaming, per-client isolation and automatic channel selection are not implemented.
