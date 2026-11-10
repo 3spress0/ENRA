@@ -291,6 +291,9 @@ validate_routed_port() {
     local iface="$1" i expected
     [[ "$iface" =~ ^[[:alnum:]_.:-]{1,15}$ ]] || die "Unsupported interface name: $iface"
     [[ ! -L "/sys/class/net/$iface/master" ]] || die "$iface is already attached to a bridge/master."
+    if iw dev 2>/dev/null | awk '$1 == "Interface" {print $2}' | grep -Fxq "$iface"; then
+        die "$iface is wireless. Additional routed segments currently require dedicated Ethernet interfaces."
+    fi
 
     # A segment already managed by the previous ENRA configuration may keep
     # its assigned address during an in-place setup update.
@@ -800,7 +803,7 @@ network_up() {
         ip link show dev "$iface" >/dev/null 2>&1 || die "ENRA segment interface not found: $iface"
         ip link set dev "$iface" up
         ip address replace "${SEGMENT_GATEWAYS[$i]}/${SEGMENT_PREFIXES[$i]}" dev "$iface"
-        segment_if_set+="$separator\\"$iface\\""
+        segment_if_set+="$separator\"$iface\""
         segment_network_set+="$separator${SEGMENT_NETWORKS[$i]}"
         separator=", "
     done
