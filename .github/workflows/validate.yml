@@ -17,7 +17,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Check Bash syntax
-        run: bash -n enra.sh
+        run: bash -n enra.sh install.sh update.sh
 
       - name: Install ShellCheck
         run: |
@@ -25,4 +25,4 @@ jobs:
           sudo apt-get install -y shellcheck
 
       - name: Lint setup script
-        run: shellcheck --severity=warning enra.sh
+        run: shellcheck --severity=warning enra.sh install.sh update.sh
