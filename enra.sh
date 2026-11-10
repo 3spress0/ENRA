@@ -286,10 +286,23 @@ validate_bridge_port() {
 }
 
 
+
 validate_routed_port() {
-    local iface="$1"
+    local iface="$1" i expected
     [[ "$iface" =~ ^[[:alnum:]_.:-]{1,15}$ ]] || die "Unsupported interface name: $iface"
     [[ ! -L "/sys/class/net/$iface/master" ]] || die "$iface is already attached to a bridge/master."
+
+    # A segment already managed by the previous ENRA configuration may keep
+    # its assigned address during an in-place setup update.
+    for ((i = 0; i < ${#PREVIOUS_SEGMENT_IFACES[@]}; i++)); do
+        if [[ "$iface" == "${PREVIOUS_SEGMENT_IFACES[$i]}" ]]; then
+            expected="${PREVIOUS_SEGMENT_GATEWAYS[$i]}/${PREVIOUS_SEGMENT_PREFIXES[$i]}"
+            if ip -4 -o address show dev "$iface" 2>/dev/null | awk '{print $4}' | grep -Fxq "$expected"; then
+                return 0
+            fi
+        fi
+    done
+
     if ip -o address show dev "$iface" scope global | grep -q .; then
         die "$iface already has a global IP address. Use a dedicated, unconfigured LAN interface."
     fi
@@ -298,7 +311,6 @@ validate_routed_port() {
         die "$iface is configured by ifupdown. Remove that stanza before assigning it to an ENRA segment."
     fi
 }
-
 validate_segment_network() {
     local gateway="$1" prefix="$2" start="$3" end="$4" dns="$5" network
     shift 5
@@ -331,8 +343,14 @@ except ValueError as error:
 PY
 )" || return 1
     if ip route show "$network" 2>/dev/null | grep -q .; then
-        printf 'Subnet %s overlaps a route already present on this machine.\n' "$network" >&2
-        return 1
+        local previous_network allowed=no
+        for previous_network in "${PREVIOUS_SEGMENT_NETWORKS[@]}"; do
+            [[ "$previous_network" != "$network" ]] || allowed=yes
+        done
+        if [[ "$allowed" != "yes" ]]; then
+            printf 'Subnet %s overlaps a route already present on this machine.\n' "$network" >&2
+            return 1
+        fi
     fi
     printf '%s' "$network"
 }
@@ -667,6 +685,19 @@ setup() {
     detect_platform
     print_banner
     install_packages base
+    PREVIOUS_SEGMENT_IFACES=()
+    PREVIOUS_SEGMENT_GATEWAYS=()
+    PREVIOUS_SEGMENT_PREFIXES=()
+    PREVIOUS_SEGMENT_NETWORKS=()
+    if [[ -r "$CONFIG_FILE" ]]; then
+        load_config
+        if [[ "${NETWORK_MODE:-}" == "routed" ]]; then
+            PREVIOUS_SEGMENT_IFACES=("${SEGMENT_IFACES[@]}")
+            PREVIOUS_SEGMENT_GATEWAYS=("${SEGMENT_GATEWAYS[@]}")
+            PREVIOUS_SEGMENT_PREFIXES=("${SEGMENT_PREFIXES[@]}")
+            PREVIOUS_SEGMENT_NETWORKS=("${SEGMENT_NETWORKS[@]}")
+        fi
+    fi
     command -v iw >/dev/null 2>&1 || die "iw is required."
     command -v hostapd >/dev/null 2>&1 || die "hostapd is required."
     command -v ip >/dev/null 2>&1 || die "iproute2 is required."
