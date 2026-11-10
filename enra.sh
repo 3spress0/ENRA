@@ -563,7 +563,7 @@ write_dnsmasq_config() {
     {
         printf 'bind-dynamic\nexcept-interface=lo\nno-resolv\nserver=%s\ndhcp-authoritative\n' "$DNS_UPSTREAM"
         for ((i = 0; i < ${#SEGMENT_IFACES[@]}; i++)); do
-            tag="enra_segment_$i"
+            tag="enrasegment$i"
             netmask="$(python3 -c 'import ipaddress,sys; print(ipaddress.IPv4Network("0.0.0.0/" + sys.argv[1]).netmask)' "${SEGMENT_PREFIXES[$i]}")"
             printf 'interface=%s\n' "${SEGMENT_IFACES[$i]}"
             printf 'dhcp-range=set:%s,%s,%s,%s,12h\n' "$tag" "${SEGMENT_DHCP_STARTS[$i]}" "${SEGMENT_DHCP_ENDS[$i]}" "$netmask"
