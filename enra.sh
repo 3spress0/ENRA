@@ -374,16 +374,14 @@ EOF
 configure_networkd_unmanaged() {
     systemctl is-active --quiet systemd-networkd.service || return 0
     mkdir -p /etc/systemd/network
-    local iface
-    for iface in "$WIFI_IF"; do
-        cat > "/etc/systemd/network/00-enra-$iface.network" <<EOF
+    local iface="$WIFI_IF"
+    cat > "/etc/systemd/network/00-enra-$iface.network" <<EOF
 [Match]
 Name=$iface
 
 [Link]
 Unmanaged=yes
 EOF
-    done
     if [[ "$NETWORK_MODE" == "bridge" ]]; then
         for iface in "$UPLINK_IF" "$BRIDGE_IF"; do
             cat > "/etc/systemd/network/00-enra-$iface.network" <<EOF
