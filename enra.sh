@@ -1092,58 +1092,25 @@ scan_new_interfaces() {
     done
 }
 
-prune_missing_segments() {
+check_missing_segments() {
     [[ "$NETWORK_MODE" == "routed" ]] || return 0
 
-    local i iface removed=no
-    local -a keep_ifaces=() keep_names=() keep_gateways=() keep_prefixes=()
-    local -a keep_networks=() keep_dhcp_starts=() keep_dhcp_ends=()
-
+    local i iface
     for ((i = 0; i < ${#SEGMENT_IFACES[@]}; i++)); do
         iface="${SEGMENT_IFACES[$i]}"
         if [[ ! -d "/sys/class/net/$iface" ]]; then
             if [[ "$iface" == "$WIFI_IF" ]]; then
                 die "Configured Wi-Fi interface is missing: $iface"
             fi
-            warn "Removing disconnected ENRA segment from saved configuration: $iface"
-            rm -f "/etc/systemd/network/00-enra-$iface.network"
-            removed=yes
-            continue
+            warn "Configured Ethernet segment $iface is currently absent. Its subnet is reserved and will be restored when the NIC returns."
         fi
-        keep_ifaces+=("$iface")
-        keep_names+=("${SEGMENT_NAMES[$i]}")
-        keep_gateways+=("${SEGMENT_GATEWAYS[$i]}")
-        keep_prefixes+=("${SEGMENT_PREFIXES[$i]}")
-        keep_networks+=("${SEGMENT_NETWORKS[$i]}")
-        keep_dhcp_starts+=("${SEGMENT_DHCP_STARTS[$i]}")
-        keep_dhcp_ends+=("${SEGMENT_DHCP_ENDS[$i]}")
     done
-
-    if [[ "$removed" == "yes" ]]; then
-        SEGMENT_IFACES=("${keep_ifaces[@]}")
-        SEGMENT_NAMES=("${keep_names[@]}")
-        SEGMENT_GATEWAYS=("${keep_gateways[@]}")
-        SEGMENT_PREFIXES=("${keep_prefixes[@]}")
-        SEGMENT_NETWORKS=("${keep_networks[@]}")
-        SEGMENT_DHCP_STARTS=("${keep_dhcp_starts[@]}")
-        SEGMENT_DHCP_ENDS=("${keep_dhcp_ends[@]}")
-        AP_GATEWAY="${SEGMENT_GATEWAYS[0]}"
-        AP_PREFIX="${SEGMENT_PREFIXES[0]}"
-        AP_NETWORK="${SEGMENT_NETWORKS[0]}"
-        DHCP_START="${SEGMENT_DHCP_STARTS[0]}"
-        DHCP_END="${SEGMENT_DHCP_ENDS[0]}"
-        save_main_config
-        write_dnsmasq_config
-        configure_network_manager
-        configure_networkd_unmanaged
-        log "Saved network configuration reconciled with connected Ethernet interfaces."
-    fi
 }
 
 network_up() {
     require_root network-up
     load_config
-    prune_missing_segments
+    check_missing_segments
     if [[ "$NETWORK_MODE" == "bridge" ]]; then
         ip link show dev "$WIFI_IF" >/dev/null 2>&1 || die "Wireless interface not found: $WIFI_IF"
         ip link show dev "$UPLINK_IF" >/dev/null 2>&1 || die "Bridge uplink not found: $UPLINK_IF"
@@ -1164,7 +1131,10 @@ network_up() {
     local i iface segment_if_set="" segment_network_set="" separator=""
     for ((i = 0; i < ${#SEGMENT_IFACES[@]}; i++)); do
         iface="${SEGMENT_IFACES[$i]}"
-        ip link show dev "$iface" >/dev/null 2>&1 || die "ENRA segment interface not found: $iface"
+        if [[ ! -d "/sys/class/net/$iface" ]]; then
+            [[ "$iface" != "$WIFI_IF" ]] || die "Wireless interface not found: $WIFI_IF"
+            continue
+        fi
         ip link set dev "$iface" up
         ip address replace "${SEGMENT_GATEWAYS[$i]}/${SEGMENT_PREFIXES[$i]}" dev "$iface"
         segment_if_set+="$separator\"$iface\""
