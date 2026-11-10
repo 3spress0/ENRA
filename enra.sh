@@ -899,7 +899,7 @@ import sys
 
 used = [ipaddress.IPv4Network(value) for value in sys.argv[1:]]
 routes = subprocess.run(
-    ["ip", "-4", "route", "show", "table", "main"],
+    ["ip", "-4", "route", "show", "table", "all"],
     check=True,
     capture_output=True,
     text=True,
@@ -914,6 +914,22 @@ for line in routes.splitlines():
         continue
     try:
         used.append(ipaddress.IPv4Network(destination, strict=False))
+    except ValueError:
+        continue
+
+addresses = subprocess.run(
+    ["ip", "-4", "-o", "address", "show", "scope", "global"],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout
+
+for line in addresses.splitlines():
+    fields = line.split()
+    if len(fields) < 4:
+        continue
+    try:
+        used.append(ipaddress.IPv4Interface(fields[3]).network)
     except ValueError:
         continue
 
