@@ -799,7 +799,7 @@ setup() {
     install_services
     # Only ENRA-owned units are managed here. Debian may intentionally mask
     # the vendor hostapd.service; ENRA runs hostapd directly via enra-ap.service.
-    systemctl unmask enra-devices.service enra-network.service enra-ap.service
+    systemctl unmask enra-devices.service enra-network.service enra-ap.service enra-hotplug-scan.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         systemctl unmask enra-dnsmasq.service
     fi
@@ -923,7 +923,7 @@ for second in range(60, 255):
             print(candidate.with_prefixlen)
             raise SystemExit(0)
 
-raise SystemExit("No unused automatic /24 subnet remains in 10.60.0.0/16 through 10.254.255.0/24.")
+raise SystemExit("No unused automatic /24 subnet remains between 10.60.0.0/24 and 10.254.255.0/24.")
 PY
 }
 
@@ -1041,12 +1041,15 @@ hotplug_add() {
 
     configure_network_manager
     configure_networkd_unmanaged
-    ip link set dev "$iface" up || {
+    if ! ip link set dev "$iface" up; then
         cp -a "$config_backup" "$CONFIG_FILE"
         cp -a "$dnsmasq_backup" "$DNSMASQ_FILE"
+        load_config
+        configure_network_manager
+        configure_networkd_unmanaged
         rm -f "$config_backup" "$dnsmasq_backup"
         die "Could not bring $iface up. Previous configuration restored."
-    }
+    fi
 
     if ! systemctl restart enra-network.service ||
        ! systemctl restart enra-dnsmasq.service; then
@@ -1130,6 +1133,8 @@ prune_missing_segments() {
         DHCP_END="${SEGMENT_DHCP_ENDS[0]}"
         save_main_config
         write_dnsmasq_config
+        configure_network_manager
+        configure_networkd_unmanaged
         log "Saved network configuration reconciled with connected Ethernet interfaces."
     fi
 }
@@ -1520,7 +1525,7 @@ refresh() {
     fi
 
     install_services
-    systemctl unmask enra-devices.service enra-network.service enra-ap.service
+    systemctl unmask enra-devices.service enra-network.service enra-ap.service enra-hotplug-scan.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         systemctl unmask enra-dnsmasq.service
     fi
