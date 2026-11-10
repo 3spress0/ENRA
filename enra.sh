@@ -173,8 +173,8 @@ choose_network_mode() {
 
 choose_interface() {
     local prompt="$1" protect_default="$2" selected
-    printf '\nAvailable interfaces:\n'
-    ip -br link
+    printf '\nAvailable interfaces:\n' >&2
+    ip -br link >&2
     read -r -p "$prompt: " selected
     [[ -n "$selected" ]] || die "No interface selected."
     ip link show dev "$selected" >/dev/null 2>&1 || die "Interface does not exist: $selected"
