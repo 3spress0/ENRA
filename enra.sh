@@ -169,7 +169,7 @@ write_configuration() {
     [[ "$SSID" =~ ^[[:print:]]+$ ]] || die "SSID must contain printable characters only."
 
     while true; do
-        read -r -s -p "WPA2 passphrase (8-63 printable characters): " PASSPHRASE
+        read -r -s -p "WPA3 passphrase (8-63 printable characters): " PASSPHRASE
         printf '\n'
         if [[ "$PASSPHRASE" =~ ^[[:print:]]{8,63}$ ]]; then
             break
@@ -200,13 +200,21 @@ channel=6
 ieee80211n=1
 wmm_enabled=1
 auth_algs=1
+# WPA3-Personal (SAE) only. PMF is mandatory for WPA3.
 wpa=2
-wpa_key_mgmt=WPA-PSK
+wpa_key_mgmt=SAE
 rsn_pairwise=CCMP
+ieee80211w=2
+sae_require_mfp=1
+sae_pwe=2
 wpa_passphrase=$PASSPHRASE
 EOF
     chmod 600 "$HOSTAPD_FILE"
     unset PASSPHRASE
+
+    if ! hostapd -t "$HOSTAPD_FILE"; then
+        die "hostapd rejected the WPA3 configuration. Check the installed hostapd build."
+    fi
 }
 
 install_systemd_units() {
@@ -286,7 +294,7 @@ setup() {
     success "ENRA setup completed."
     printf 'SSID: %s\n' "$SSID"
     printf 'Bridge: %s <-> %s\n' "$UPLINK_IF" "$WIFI_IF"
-    printf 'Security: WPA2-Personal (AES/CCMP)\n'
+    printf 'Security: WPA3-Personal (SAE, PMF required)\n'
     printf 'Services: enra-bridge.service, enra-ap.service\n'
     warn "OPNsense must provide DHCP, routing and firewalling on the same LAN Segment."
 }
