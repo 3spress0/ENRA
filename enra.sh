@@ -106,6 +106,32 @@ supports_ap_mode() {
              END {if (!found) exit 1}'
 }
 
+install_rtl8821au_firmware() {
+    log "Checking firmware package for RTL8821AU."
+    case "$PACKAGE_MANAGER:$DISTRO_ID" in
+        apt:debian)
+            apt-get install -y firmware-realtek ||
+                warn "firmware-realtek unavailable. Debian may need the non-free-firmware repository component enabled."
+            ;;
+        apt:*)
+            apt-get install -y linux-firmware ||
+                warn "linux-firmware could not be installed automatically."
+            ;;
+        dnf:*)
+            dnf install -y linux-firmware ||
+                warn "linux-firmware could not be installed automatically."
+            ;;
+        pacman:*)
+            pacman -S --needed --noconfirm linux-firmware ||
+                warn "linux-firmware could not be installed automatically."
+            ;;
+        zypper:*)
+            zypper --non-interactive install kernel-firmware-realtek ||
+                warn "kernel-firmware-realtek could not be installed automatically."
+            ;;
+    esac
+}
+
 install_rtl8821au() {
     local kernel
     kernel="$(uname -r)"
@@ -131,18 +157,7 @@ discover_driver() {
     local usb_list="$1"
     if [[ -n "$(wireless_list)" ]]; then return 0; fi
     if [[ "$usb_list" == *"0bda:0811"* ]]; then
-        case "$PACKAGE_MANAGER" in
-            apt)
-                if [[ "$DISTRO_ID" == "debian" ]]; then
-                    apt-get install -y firmware-realtek || warn "firmware-realtek could not be installed; verify Debian non-free-firmware is enabled."
-                else
-                    apt-get install -y linux-firmware || warn "linux-firmware could not be installed automatically."
-                fi
-                ;;
-            dnf) dnf install -y linux-firmware || warn "linux-firmware could not be installed automatically." ;;
-            pacman) pacman -S --needed --noconfirm linux-firmware || warn "linux-firmware could not be installed automatically." ;;
-            zypper) zypper --non-interactive install kernel-firmware-realtek || warn "Realtek firmware package could not be installed automatically." ;;
-        esac
+        install_rtl8821au_firmware
         modprobe rtw88_8821au >/dev/null 2>&1 || true
         modprobe 8821au >/dev/null 2>&1 || true
         sleep 2
@@ -524,8 +539,12 @@ network_up() {
         ip link set dev "$BRIDGE_IF" up
     else
         ip address replace "$AP_GATEWAY/$AP_PREFIX" dev "$WIFI_IF"
+        install -d -m 700 /run/enra
+        if [[ ! -f /run/enra/ip_forward.previous ]]; then
+            sysctl -n net.ipv4.ip_forward > /run/enra/ip_forward.previous
+            chmod 600 /run/enra/ip_forward.previous
+        fi
         sysctl -w net.ipv4.ip_forward=1 >/dev/null
-        printf 'net.ipv4.ip_forward=1\n' > /etc/sysctl.d/90-enra-forward.conf
         nft list table inet enra >/dev/null 2>&1 && nft delete table inet enra
         nft -f - <<EOF
 table inet enra {
@@ -558,7 +577,14 @@ network_down() {
     else
         nft list table inet enra >/dev/null 2>&1 && nft delete table inet enra || true
         ip address del "$AP_GATEWAY/$AP_PREFIX" dev "$WIFI_IF" 2>/dev/null || true
-        # Do not disable IP forwarding globally; another service may depend on it.
+        if [[ -f /run/enra/ip_forward.previous ]]; then
+            local previous_forward
+            previous_forward="$(cat /run/enra/ip_forward.previous)"
+            if [[ "$previous_forward" == "0" || "$previous_forward" == "1" ]]; then
+                sysctl -w "net.ipv4.ip_forward=$previous_forward" >/dev/null || true
+            fi
+            rm -f /run/enra/ip_forward.previous
+        fi
     fi
 }
 
