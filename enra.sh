@@ -557,7 +557,10 @@ setup() {
     install_services
     # Only ENRA-owned units are managed here. Debian may intentionally mask
     # the vendor hostapd.service; ENRA runs hostapd directly via enra-ap.service.
-    systemctl unmask enra-network.service enra-ap.service enra-dnsmasq.service
+    systemctl unmask enra-network.service enra-ap.service
+    if [[ "$NETWORK_MODE" == "routed" ]]; then
+        systemctl unmask enra-dnsmasq.service
+    fi
     systemctl daemon-reload
     log "Enabling ENRA services..."
     systemctl enable enra-network.service enra-ap.service
