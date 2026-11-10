@@ -2,7 +2,7 @@
 
 **espress0's Network Routing Architecture**
 
-ENRA is a configurable Linux access-point and network-edge utility built around hostapd, Linux networking and systemd. It adapts to different Linux distributions, wireless adapters, radio settings and network topologies.
+ENRA is a configurable Linux access-point and network-edge utility built around hostapd, nl80211, Linux networking and systemd. It supports multiple package families, wireless adapters with Linux AP-mode support, radio settings, security profiles and two common network topologies. Adapter driver installation is deliberately separate from AP configuration: ENRA will not guess and replace arbitrary third-party drivers.
 
 ## Features
 
@@ -87,7 +87,7 @@ cd ENRA
 sudo ./enra.sh setup
 ~~~
 
-Setup installs hostapd and wireless tools using the detected package manager. It discovers wireless interfaces, checks that the selected interface advertises AP mode, and asks for topology, interfaces, radio settings and security profile.
+Setup detects the package manager, installs hostapd and wireless tools, discovers wireless interfaces and verifies AP mode. It then asks for network topology, interfaces, radio settings and security profile. It marks selected interfaces unmanaged in NetworkManager and systemd-networkd where those services are active. If ifupdown has an explicit stanza for a bridge port, setup stops rather than silently rewriting it.
 
 ### Existing Debian + RTL8821AU + OPNsense setup
 
@@ -133,9 +133,9 @@ ENRA uses **enra-network.service** and **enra-ap.service**. Routed mode also use
 - Routed mode currently provides IPv4 DHCP and NAT. IPv6 forwarding/firewalling is not configured.
 - VLANs, 802.1X/RADIUS, captive portals, mesh, multi-AP roaming, per-client isolation and automatic channel selection are not implemented.
 - Bridge mode exposes the LAN according to the upstream router's policy; it does not create a guest-network security boundary.
-- Routed mode adds an nftables forward chain and NAT rules for the ENRA AP subnet. Review existing firewall policies before enabling it.
-- Selected interfaces should not simultaneously be managed by another network manager or DHCP client. Check NetworkManager, systemd-networkd and ifupdown configuration before setup.
+- Routed mode adds an ENRA-owned nftables table with forwarding and NAT rules for the AP subnet. Stopping ENRA removes that table and restores the prior IPv4 forwarding setting. Review existing firewall policies before enabling it.
+- ENRA marks selected interfaces unmanaged in NetworkManager and systemd-networkd where available. Explicit ifupdown configurations are detected on bridge ports and cause setup to stop. Other third-party network managers or custom scripts must be reviewed manually.
 
 ## Development status
 
-ENRA is an early release. It has not been tested across all listed package families, kernels, adapters, security modes or network topologies. Issue reports should include distribution, kernel version, adapter chipset/USB ID, driver, network mode and relevant service logs.
+ENRA is an early release. CI checks Bash syntax and ShellCheck, but does not emulate Wi-Fi hardware or verify packet forwarding. It has not been tested across every listed package family, kernel, adapter, security mode or topology. Issue reports should include distribution, kernel version, adapter chipset/USB ID, driver, network mode and relevant service logs.
