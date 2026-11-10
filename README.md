@@ -54,7 +54,7 @@ The setup is interactive. It installs the required packages and driver, detects 
 
 **Select only the dedicated OPNsense LAN Segment interface. Do not select the VMware NAT interface or the interface carrying Debian's default route.** ENRA rejects interfaces with a default route, a configured global IP address, an ifupdown stanza, or an existing bridge master. Before continuing, confirm that NetworkManager, systemd-networkd, or another DHCP client does not manage the selected interface.
 
-The installer asks for the SSID and WPA3 passphrase. The passphrase is stored in /etc/enra/hostapd.conf, which is readable only by root. The generated configuration is checked with hostapd before services are enabled.
+The installer asks for the SSID and WPA3 passphrase. The passphrase is stored in /etc/enra/hostapd.conf, which is readable only by root. If the installed hostapd or wireless driver rejects WPA3, the access-point service will fail and its journal will contain the reason.
 
 If matching headers for the currently running kernel are unavailable, the installer installs Debian's kernel and header metapackages and stops. Reboot, return to this directory, and run the setup command again.
 
