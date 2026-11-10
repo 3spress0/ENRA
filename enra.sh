@@ -55,6 +55,7 @@ install_driver() {
 
     if modinfo rtw88_8821au >/dev/null 2>&1 &&
        modinfo -F alias rtw88_8821au 2>/dev/null | grep -qi 'v0BDAp0811'; then
+        apt-get install -y firmware-realtek
         DRIVER_MODULE="rtw88_8821au"
         log "Using the in-kernel rtw88_8821au driver."
     elif modinfo 8821au >/dev/null 2>&1 &&
@@ -143,6 +144,10 @@ choose_uplink_interface() {
 
     if ip -o address show dev "$UPLINK_IF" scope global | grep -q .; then
         die "$UPLINK_IF already has a global IP address. Remove its DHCP/static IP configuration before using it as a bridge port."
+    fi
+
+    if grep -RqsE "^[[:space:]]*(auto|allow-hotplug|iface)[[:space:]]+$UPLINK_IF([[:space:]]|$)" /etc/network/interfaces /etc/network/interfaces.d 2>/dev/null; then
+        die "$UPLINK_IF is configured by ifupdown. Remove that interface configuration before using it as an ENRA bridge port."
     fi
 
     if [[ -L "/sys/class/net/$UPLINK_IF/master" ]]; then
@@ -252,7 +257,7 @@ setup() {
     print_banner
     log "Installing ENRA dependencies."
     apt-get update
-    apt-get install -y build-essential bc dkms git iw rfkill hostapd iproute2 usbutils
+    apt-get install -y build-essential bc dkms git iw rfkill hostapd iproute2 usbutils wireless-regdb
 
     log "Checking USB adapter."
     lsusb | grep -qi '0bda:0811' ||
