@@ -473,7 +473,9 @@ setup() {
     configure_interfaces
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         install_packages routed
-        systemctl disable --now dnsmasq.service >/dev/null 2>&1 || true
+        if systemctl is-active --quiet dnsmasq.service; then
+            die "dnsmasq.service became active during package installation. Stop and inspect that service before running ENRA routed mode."
+        fi
     fi
     configure_radio
     configure_security
