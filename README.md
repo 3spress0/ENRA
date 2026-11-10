@@ -129,12 +129,14 @@ After setup, the command is installed as **/usr/local/sbin/enra**:
 
 ~~~bash
 sudo enra status
+sudo enra /validate
 sudo enra start
 sudo enra stop
 sudo enra logs
 ~~~
 
 Use **`enra status`** to inspect the ENRA-owned service units, startup state, network addresses, wireless mode and recent logs. Checking `systemctl status hostapd` or `systemctl status dnsmasq` does not show ENRA service health.
+Use **`enra /validate`** to run read-only checks against the saved configuration, required commands, wireless AP capability/state, routed-mode dnsmasq configuration, gateway address, IPv4 forwarding, nftables table and ENRA-managed systemd services. It returns a non-zero exit status when a blocking check fails. The shorter alias **`enra validate`** is also accepted.
 
 ENRA uses its own systemd units: **enra-network.service** and **enra-ap.service**. Routed mode also uses **enra-dnsmasq.service**. Services are enabled during setup and start on boot. The installer starts these units directly and does not depend on the distribution-provided **hostapd.service** or **dnsmasq.service**. On Debian, **hostapd.service** may be masked by the package and **dnsmasq-base** may not provide a **dnsmasq.service** unit; neither condition prevents ENRA from working. Do not unmask or start the distribution units to operate ENRA.
 
