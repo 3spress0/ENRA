@@ -9,7 +9,8 @@ ENRA is a configurable Linux access-point and network-edge utility built around 
 ```bash
 git clone https://github.com/3spress0/ENRA.git
 cd ENRA
-sudo ./enra.sh setup
+sudo ./install.sh
+sudo enra setup
 ```
 
 Setup is interactive. Choose **bridge** when an existing router handles DHCP and firewalling, or **routed** when ENRA should provide multiple isolated IPv4 segments with DHCP and NAT. WPA3-Personal is the default, but requires compatible Wi-Fi hardware, drivers, firmware and clients.
@@ -33,7 +34,9 @@ sudo enra status
 - Optional RTL8821AU DKMS installation when USB ID **0bda:0811** is detected and no wireless interface exists.
 - Graceful warning and exit when no wireless interface is available; base dependencies remain installed.
 - Kernel-header fallback for DKMS builds. On Debian, if headers for the running kernel are unavailable, ENRA installs the current kernel and matching headers and asks for a reboot before continuing.
-- systemd services for startup and recovery.
+- Boot-time discovery and link bring-up for all detected hardware-backed network interfaces.
+- systemd services for device bring-up, network configuration, access-point startup and recovery.
+- Installable **enra** command in **/usr/local/sbin**, plus a GitHub-based updater.
 - Credentials stored in root-only files under **/etc/enra**.
 
 ## Supported platforms
@@ -128,24 +131,36 @@ The RTL8821AU maintainers recommend an in-kernel driver where available on moder
 
 ## Commands
 
-After setup, the command is installed as **/usr/local/sbin/enra**:
+Install ENRA from a cloned repository with **sudo ./install.sh**. The installer places the command at **/usr/local/sbin/enra** and the updater at **/usr/local/sbin/enra-update**. You can then use ENRA from your PATH:
 
 ~~~bash
+sudo enra setup
 sudo enra status
 sudo enra /validate
+sudo enra /config
+sudo enra update
 sudo enra start
 sudo enra stop
 sudo enra logs
 ~~~
 
+The installer can also be run directly from GitHub:
+
+~~~bash
+curl -fsSL https://raw.githubusercontent.com/3spress0/ENRA/main/install.sh | sudo bash
+sudo enra setup
+~~~
+
 Use **`enra status`** to inspect the ENRA-owned service units, startup state, network addresses, wireless mode and recent logs. Checking `systemctl status hostapd` or `systemctl status dnsmasq` does not show ENRA service health.
 Use **`enra /validate`** to run read-only checks against the saved configuration, required commands, wireless AP capability/state, routed-mode dnsmasq configuration, gateway address, IPv4 forwarding, nftables table and ENRA-managed systemd services. It returns a non-zero exit status when a blocking check fails. The shorter alias **`enra validate`** is also accepted.
 
-ENRA uses its own systemd units: **enra-network.service** and **enra-ap.service**. Routed mode also uses **enra-dnsmasq.service**. Services are enabled during setup and start on boot. The installer starts these units directly and does not depend on the distribution-provided **hostapd.service** or **dnsmasq.service**. On Debian, **hostapd.service** may be masked by the package and **dnsmasq-base** may not provide a **dnsmasq.service** unit; neither condition prevents ENRA from working. Do not unmask or start the distribution units to operate ENRA.
+ENRA uses its own systemd units: **enra-devices.service**, **enra-network.service** and **enra-ap.service**. Routed mode also uses **enra-dnsmasq.service**. Services are enabled during setup and start on boot. The device service runs after the network managers and udev settle, discovers hardware-backed interfaces under **/sys/class/net**, and sets their link state to UP. It excludes loopback and ENRA's bridge. The installer starts these units directly and does not depend on the distribution-provided **hostapd.service** or **dnsmasq.service**. On Debian, **hostapd.service** may be masked by the package and **dnsmasq-base** may not provide a **dnsmasq.service** unit; neither condition prevents ENRA from working. Do not unmask or start the distribution units to operate ENRA.
 
 ## Configuration and limitations
 
-- Main configuration: **/etc/enra/enra.conf**.
+- Main configuration: **/etc/enra/enra.conf**. Use **sudo enra /config** to edit it, **sudo enra /config show** to display it, or **sudo enra /config path** to print its path. Edits are syntax-checked and backed up. The generated hostapd and dnsmasq files are separate; rerun setup to rebuild those profiles.
+- Automatic interface bring-up is enabled by default with **AUTO_UP_INTERFACES=true**. Set it to **false** to disable. Put space-separated or comma-separated interface names in **AUTO_UP_EXCLUDE** to leave specific adapters untouched.
+- Automatic bring-up changes link state only. It does not assign IP addresses, start DHCP clients, or create extra default routes. NetworkManager/systemd-networkd continue to handle interfaces they manage; ENRA assigns addresses only to interfaces in its selected topology.
 - hostapd credentials: **/etc/enra/hostapd.conf** (root-only).
 - Routed DHCP/DNS configuration: **/etc/enra/dnsmasq.conf** (root-only). ENRA intentionally stores these files under `/etc/enra`; it does not use `/etc/hostapd` or `/etc/dnsmasq.d`.
 - Configures 2.4 GHz and 5 GHz hostapd profiles. Actual channels depend on country, adapter and driver.
@@ -154,7 +169,7 @@ ENRA uses its own systemd units: **enra-network.service** and **enra-ap.service*
 - VLANs, 802.1X/RADIUS, captive portals, mesh, multi-AP roaming, per-client isolation and automatic channel selection are not implemented.
 - Bridge mode exposes the LAN according to the upstream router's policy; it does not create a guest-network security boundary.
 - Routed mode adds an ENRA-owned nftables table with forwarding and NAT rules for every configured segment. Segment-to-segment forwarding and unsolicited upstream-to-segment traffic are blocked. Stopping ENRA removes that table and restores the prior IPv4 forwarding setting. Review existing firewall policies before enabling it.
-- ENRA marks selected interfaces unmanaged in NetworkManager and systemd-networkd where available. Explicit ifupdown configurations are detected on bridge ports and cause setup to stop. Other third-party network managers or custom scripts must be reviewed manually.
+- ENRA marks selected interfaces unmanaged in NetworkManager and systemd-networkd where available. The boot-time device service only raises hardware-backed links; it does not override addressing or routing policy. Explicit ifupdown configurations are detected on bridge ports and cause setup to stop. Other third-party network managers or custom scripts must be reviewed manually.
 
 ## Development status
 
