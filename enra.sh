@@ -545,7 +545,13 @@ network_up() {
             chmod 600 /run/enra/ip_forward.previous
         fi
         sysctl -w net.ipv4.ip_forward=1 >/dev/null
-        nft list table inet enra >/dev/null 2>&1 && nft delete table inet enra
+        install -d -m 700 /run/enra
+        if nft list table inet enra >/dev/null 2>&1; then
+            [[ -f /run/enra/nft-table-owned ]] ||
+                die "The nftables table inet enra already exists and is not owned by this ENRA instance. Choose another table name or inspect the existing rules."
+            nft delete table inet enra
+            rm -f /run/enra/nft-table-owned
+        fi
         nft -f - <<EOF
 table inet enra {
     chain forward {
@@ -560,6 +566,8 @@ table inet enra {
     }
 }
 EOF
+        touch /run/enra/nft-table-owned
+        chmod 600 /run/enra/nft-table-owned
     fi
 }
 
@@ -575,7 +583,10 @@ network_down() {
             ip link delete dev "$BRIDGE_IF" type bridge || true
         fi
     else
-        nft list table inet enra >/dev/null 2>&1 && nft delete table inet enra || true
+        if [[ -f /run/enra/nft-table-owned ]]; then
+            nft list table inet enra >/dev/null 2>&1 && nft delete table inet enra || true
+            rm -f /run/enra/nft-table-owned
+        fi
         ip address del "$AP_GATEWAY/$AP_PREFIX" dev "$WIFI_IF" 2>/dev/null || true
         if [[ -f /run/enra/ip_forward.previous ]]; then
             local previous_forward
