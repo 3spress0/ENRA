@@ -644,7 +644,7 @@ install_services() {
     cat > /etc/systemd/system/enra-devices.service <<'EOF'
 [Unit]
 Description=ENRA bring up detected network interfaces
-Wants=network-pre.target
+Wants=network-pre.target systemd-udev-settle.service
 After=network-pre.target systemd-udev-settle.service NetworkManager.service systemd-networkd.service
 Before=enra-network.service
 
