@@ -151,7 +151,9 @@ choose_uplink_interface() {
     fi
 
     if [[ -L "/sys/class/net/$UPLINK_IF/master" ]]; then
-        die "$UPLINK_IF is already attached to another bridge or master."
+        local existing_master
+        existing_master="$(basename "$(readlink -f "/sys/class/net/$UPLINK_IF/master")")"
+        [[ "$existing_master" == "$BRIDGE_IF" ]] || die "$UPLINK_IF is already attached to $existing_master."
     fi
     success "Selected wired bridge port: $UPLINK_IF"
 }
@@ -271,7 +273,11 @@ setup() {
 
     log "Enabling ENRA bridge and access point services."
     systemctl enable enra-bridge.service enra-ap.service
-    if ! systemctl start enra-bridge.service enra-ap.service; then
+    if ! systemctl restart enra-bridge.service; then
+        systemctl --no-pager --full status enra-bridge.service || true
+        die "ENRA bridge service did not start. Review the output above."
+    fi
+    if ! systemctl restart enra-ap.service; then
         systemctl --no-pager --full status enra-bridge.service enra-ap.service || true
         journalctl -u enra-bridge.service -u enra-ap.service -n 60 --no-pager || true
         die "ENRA services did not start. Review the output above."
