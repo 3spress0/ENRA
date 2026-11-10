@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly ENRA_VERSION="0.2.5"
+readonly ENRA_VERSION="0.3.0"
 readonly CONFIG_DIR="/etc/enra"
 readonly CONFIG_FILE="$CONFIG_DIR/enra.conf"
 readonly HOSTAPD_FILE="$CONFIG_DIR/hostapd.conf"
@@ -47,12 +47,23 @@ require_systemd() {
     [[ "$(ps -p 1 -o comm= 2>/dev/null | tr -d ' ')" == "systemd" ]] ||
         die "ENRA service integration currently requires systemd."
 }
+
 load_config() {
     [[ -f "$CONFIG_FILE" ]] || die "ENRA is not configured. Run: sudo enra setup"
     # shellcheck source=/etc/enra/enra.conf
     source "$CONFIG_FILE"
-}
 
+    # Migrate existing single-Wi-Fi routed configurations in memory.
+    if [[ "$NETWORK_MODE" == "routed" && -z "${SEGMENT_IFACES+x}" ]]; then
+        SEGMENT_IFACES=("$WIFI_IF")
+        SEGMENT_NAMES=("Wi-Fi")
+        SEGMENT_GATEWAYS=("$AP_GATEWAY")
+        SEGMENT_PREFIXES=("$AP_PREFIX")
+        SEGMENT_NETWORKS=("$AP_NETWORK")
+        SEGMENT_DHCP_STARTS=("$DHCP_START")
+        SEGMENT_DHCP_ENDS=("$DHCP_END")
+    fi
+}
 detect_platform() {
     [[ -r /etc/os-release ]] || die "Cannot identify this Linux distribution."
     . /etc/os-release
@@ -274,47 +285,149 @@ validate_bridge_port() {
     fi
 }
 
+
+validate_routed_port() {
+    local iface="$1"
+    [[ "$iface" =~ ^[[:alnum:]_.:-]{1,15}$ ]] || die "Unsupported interface name: $iface"
+    [[ ! -L "/sys/class/net/$iface/master" ]] || die "$iface is already attached to a bridge/master."
+    if ip -o address show dev "$iface" scope global | grep -q .; then
+        die "$iface already has a global IP address. Use a dedicated, unconfigured LAN interface."
+    fi
+    if grep -RqsE "^[[:space:]]*(auto|allow-hotplug|iface)[[:space:]]+$iface([[:space:]]|$)" \
+        /etc/network/interfaces /etc/network/interfaces.d 2>/dev/null; then
+        die "$iface is configured by ifupdown. Remove that stanza before assigning it to an ENRA segment."
+    fi
+}
+
+validate_segment_network() {
+    local gateway="$1" prefix="$2" start="$3" end="$4" dns="$5" network
+    shift 5
+    network="$(python3 - "$gateway" "$prefix" "$start" "$end" "$dns" "$@" <<'PY'
+import ipaddress, sys
+
+try:
+    gateway = ipaddress.IPv4Address(sys.argv[1])
+    prefix = int(sys.argv[2])
+    start = ipaddress.IPv4Address(sys.argv[3])
+    end = ipaddress.IPv4Address(sys.argv[4])
+    ipaddress.IPv4Address(sys.argv[5])
+    if not 8 <= prefix <= 30:
+        raise ValueError("Subnet prefix must be between 8 and 30.")
+    network = ipaddress.IPv4Network((gateway, prefix), strict=False)
+    if gateway in (network.network_address, network.broadcast_address):
+        raise ValueError("Gateway must be a usable address in the subnet.")
+    if start not in network or end not in network or start > end:
+        raise ValueError("DHCP range must be ordered and inside the segment subnet.")
+    if start in (network.network_address, network.broadcast_address) or end in (network.network_address, network.broadcast_address):
+        raise ValueError("DHCP range cannot include the network or broadcast address.")
+    if start <= gateway <= end:
+        raise ValueError("Gateway must be outside the DHCP range.")
+    for existing in sys.argv[6:]:
+        if network.overlaps(ipaddress.IPv4Network(existing)):
+            raise ValueError(f"Segment subnet overlaps another ENRA segment: {existing}")
+    print(network.with_prefixlen)
+except ValueError as error:
+    raise SystemExit(str(error))
+PY
+)" || return 1
+    if ip route show "$network" 2>/dev/null | grep -q .; then
+        printf 'Subnet %s overlaps a route already present on this machine.\n' "$network" >&2
+        return 1
+    fi
+    printf '%s' "$network"
+}
+
+
 configure_interfaces() {
+    local segment_count selected i default_gateway gateway prefix start end network
     if [[ "$NETWORK_MODE" == "bridge" ]]; then
         UPLINK_IF="$(choose_interface "Interface connected to the LAN being bridged" yes)"
         [[ "$UPLINK_IF" != "$WIFI_IF" ]] || die "Wired and wireless interfaces must be different."
         validate_bridge_port "$UPLINK_IF"
         AP_GATEWAY="" AP_PREFIX="" AP_NETWORK="" DHCP_START="" DHCP_END="" DNS_UPSTREAM=""
-    else
-        UPLINK_IF="$(choose_interface "Internet/upstream interface" no)"
-        [[ "$UPLINK_IF" != "$WIFI_IF" ]] || die "AP and uplink interfaces must be different."
-        read -r -p "AP gateway IPv4 [10.42.0.1]: " AP_GATEWAY
-        AP_GATEWAY="${AP_GATEWAY:-10.42.0.1}"
-        read -r -p "AP subnet prefix [24]: " AP_PREFIX
-        AP_PREFIX="${AP_PREFIX:-24}"
-        [[ "$AP_PREFIX" =~ ^([8-9]|[12][0-9]|30)$ ]] || die "Use an IPv4 prefix between 8 and 30."
-        read -r -p "DHCP range start [10.42.0.50]: " DHCP_START
-        DHCP_START="${DHCP_START:-10.42.0.50}"
-        read -r -p "DHCP range end [10.42.0.200]: " DHCP_END
-        DHCP_END="${DHCP_END:-10.42.0.200}"
-        read -r -p "Upstream DNS server [1.1.1.1]: " DNS_UPSTREAM
-        DNS_UPSTREAM="${DNS_UPSTREAM:-1.1.1.1}"
-        AP_NETWORK="$(python3 - "$AP_GATEWAY" "$AP_PREFIX" "$DHCP_START" "$DHCP_END" "$DNS_UPSTREAM" <<'PY'
-import ipaddress, sys
-gateway = ipaddress.IPv4Address(sys.argv[1])
-network = ipaddress.IPv4Network((gateway, int(sys.argv[2])), strict=False)
-start, end, dns = (ipaddress.IPv4Address(value) for value in sys.argv[3:6])
-if start not in network or end not in network or start > end:
-    raise SystemExit("DHCP range must be ordered and inside the AP subnet.")
-if gateway in (network.network_address, network.broadcast_address) or start <= gateway <= end:
-    raise SystemExit("Gateway must be a usable address outside the DHCP range.")
-print(network.with_prefixlen)
-PY
-)" || die "Invalid routed network values."
-        ip route show "$AP_NETWORK" 2>/dev/null | grep -q . &&
-            die "AP subnet overlaps a route already present on this machine."
-        if systemctl is-active --quiet dnsmasq.service; then
-            die "The system dnsmasq.service is active. Resolve that DNS/DHCP conflict before choosing routed mode."
-        fi
+        SEGMENT_IFACES=() SEGMENT_NAMES=() SEGMENT_GATEWAYS=() SEGMENT_PREFIXES=()
+        SEGMENT_NETWORKS=() SEGMENT_DHCP_STARTS=() SEGMENT_DHCP_ENDS=()
+        return 0
+    fi
+
+    UPLINK_IF="$(choose_interface "Internet/upstream interface" no)"
+    [[ "$UPLINK_IF" != "$WIFI_IF" ]] || die "AP and uplink interfaces must be different."
+
+    DNS_UPSTREAM=""
+    read -r -p "Upstream DNS server [1.1.1.1]: " DNS_UPSTREAM
+    DNS_UPSTREAM="${DNS_UPSTREAM:-1.1.1.1}"
+
+    SEGMENT_IFACES=("$WIFI_IF")
+    SEGMENT_NAMES=("Wi-Fi")
+    SEGMENT_GATEWAYS=()
+    SEGMENT_PREFIXES=()
+    SEGMENT_NETWORKS=()
+    SEGMENT_DHCP_STARTS=()
+    SEGMENT_DHCP_ENDS=()
+
+    read -r -p "Wi-Fi segment gateway IPv4 [10.42.0.1]: " gateway
+    gateway="${gateway:-10.42.0.1}"
+    read -r -p "Wi-Fi segment subnet prefix [24]: " prefix
+    prefix="${prefix:-24}"
+    read -r -p "Wi-Fi DHCP range start [10.42.0.50]: " start
+    start="${start:-10.42.0.50}"
+    read -r -p "Wi-Fi DHCP range end [10.42.0.200]: " end
+    end="${end:-10.42.0.200}"
+    network="$(validate_segment_network "$gateway" "$prefix" "$start" "$end" "$DNS_UPSTREAM")" ||
+        die "Invalid Wi-Fi segment network settings."
+    SEGMENT_GATEWAYS+=("$gateway")
+    SEGMENT_PREFIXES+=("$prefix")
+    SEGMENT_NETWORKS+=("$network")
+    SEGMENT_DHCP_STARTS+=("$start")
+    SEGMENT_DHCP_ENDS+=("$end")
+
+    read -r -p "Additional Ethernet LAN segments [0]: " segment_count
+    segment_count="${segment_count:-0}"
+    [[ "$segment_count" =~ ^(0|[1-9][0-9]*)$ ]] || die "Enter a whole number of additional Ethernet segments."
+    (( segment_count <= 32 )) || die "ENRA supports up to 32 additional Ethernet segments per instance."
+
+    for ((i = 1; i <= segment_count; i++)); do
+        printf '\nEthernet segment %s of %s\n' "$i" "$segment_count"
+        selected="$(choose_interface "Dedicated Ethernet interface for segment $i" yes)"
+        [[ "$selected" != "$UPLINK_IF" && "$selected" != "$WIFI_IF" ]] ||
+            die "$selected is already assigned to another ENRA role."
+        for existing in "${SEGMENT_IFACES[@]}"; do
+            [[ "$selected" != "$existing" ]] || die "$selected is already assigned to another ENRA segment."
+        done
+        validate_routed_port "$selected"
+
+        default_gateway="10.$((42 + i)).0.1"
+        read -r -p "Segment $i gateway IPv4 [$default_gateway]: " gateway
+        gateway="${gateway:-$default_gateway}"
+        read -r -p "Segment $i subnet prefix [24]: " prefix
+        prefix="${prefix:-24}"
+        read -r -p "Segment $i DHCP range start [10.$((42 + i)).0.50]: " start
+        start="${start:-10.$((42 + i)).0.50}"
+        read -r -p "Segment $i DHCP range end [10.$((42 + i)).0.200]: " end
+        end="${end:-10.$((42 + i)).0.200}"
+        network="$(validate_segment_network "$gateway" "$prefix" "$start" "$end" "$DNS_UPSTREAM" "${SEGMENT_NETWORKS[@]}")" ||
+            die "Invalid network settings for Ethernet segment $i."
+
+        SEGMENT_IFACES+=("$selected")
+        SEGMENT_NAMES+=("Ethernet $i")
+        SEGMENT_GATEWAYS+=("$gateway")
+        SEGMENT_PREFIXES+=("$prefix")
+        SEGMENT_NETWORKS+=("$network")
+        SEGMENT_DHCP_STARTS+=("$start")
+        SEGMENT_DHCP_ENDS+=("$end")
+    done
+
+    AP_GATEWAY="${SEGMENT_GATEWAYS[0]}"
+    AP_PREFIX="${SEGMENT_PREFIXES[0]}"
+    AP_NETWORK="${SEGMENT_NETWORKS[0]}"
+    DHCP_START="${SEGMENT_DHCP_STARTS[0]}"
+    DHCP_END="${SEGMENT_DHCP_ENDS[0]}"
+
+    if systemctl is-active --quiet dnsmasq.service; then
+        die "The system dnsmasq.service is active. Resolve that DNS/DHCP conflict before choosing routed mode."
     fi
     return 0
 }
-
 configure_radio() {
     local answer default_channel
     read -r -p "Regulatory country code (ISO alpha-2) [NL]: " COUNTRY_CODE
@@ -354,6 +467,19 @@ configure_security() {
     done
 }
 
+
+write_config_array() {
+    local name="$1" value index=0
+    shift
+    printf '%s=(' "$name"
+    for value in "$@"; do
+        printf '[%s]=%q ' "$index" "$value"
+        index=$((index + 1))
+    done
+    printf ')\n'
+}
+
+
 write_configuration() {
     local ssid_bytes
     read -r -p "Wi-Fi network name [espers cool network]: " SSID
@@ -371,13 +497,21 @@ write_configuration() {
         printf 'AP_GATEWAY=%q\nAP_PREFIX=%q\nAP_NETWORK=%q\n' "$AP_GATEWAY" "$AP_PREFIX" "$AP_NETWORK"
         printf 'DHCP_START=%q\nDHCP_END=%q\nDNS_UPSTREAM=%q\nDRIVER_MODULE=%q\n' \
             "$DHCP_START" "$DHCP_END" "$DNS_UPSTREAM" "${DRIVER_MODULE:-}"
+        if [[ "$NETWORK_MODE" == "routed" ]]; then
+            write_config_array SEGMENT_IFACES "${SEGMENT_IFACES[@]}"
+            write_config_array SEGMENT_NAMES "${SEGMENT_NAMES[@]}"
+            write_config_array SEGMENT_GATEWAYS "${SEGMENT_GATEWAYS[@]}"
+            write_config_array SEGMENT_PREFIXES "${SEGMENT_PREFIXES[@]}"
+            write_config_array SEGMENT_NETWORKS "${SEGMENT_NETWORKS[@]}"
+            write_config_array SEGMENT_DHCP_STARTS "${SEGMENT_DHCP_STARTS[@]}"
+            write_config_array SEGMENT_DHCP_ENDS "${SEGMENT_DHCP_ENDS[@]}"
+        fi
     } > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE"
     write_hostapd_config
     [[ "$NETWORK_MODE" != "routed" ]] || write_dnsmasq_config
     unset PASSPHRASE
 }
-
 write_hostapd_config() {
     local radio security
     if [[ "$BAND" == "2.4" ]]; then
@@ -401,67 +535,74 @@ write_hostapd_config() {
     chmod 600 "$HOSTAPD_FILE"
 }
 
+
 write_dnsmasq_config() {
-    cat > "$DNSMASQ_FILE" <<EOF
-interface=$WIFI_IF
-bind-dynamic
-except-interface=lo
-no-resolv
-server=$DNS_UPSTREAM
-dhcp-authoritative
-dhcp-range=$DHCP_START,$DHCP_END,12h
-dhcp-option=option:router,$AP_GATEWAY
-dhcp-option=option:dns-server,$AP_GATEWAY
-EOF
+    local i tag netmask
+    {
+        printf 'bind-dynamic\nexcept-interface=lo\nno-resolv\nserver=%s\ndhcp-authoritative\n' "$DNS_UPSTREAM"
+        for ((i = 0; i < ${#SEGMENT_IFACES[@]}; i++)); do
+            tag="enra_segment_$i"
+            netmask="$(python3 -c 'import ipaddress,sys; print(ipaddress.IPv4Network("0.0.0.0/" + sys.argv[1]).netmask)' "${SEGMENT_PREFIXES[$i]}")"
+            printf 'interface=%s\n' "${SEGMENT_IFACES[$i]}"
+            printf 'dhcp-range=set:%s,%s,%s,%s,12h\n' "$tag" "${SEGMENT_DHCP_STARTS[$i]}" "${SEGMENT_DHCP_ENDS[$i]}" "$netmask"
+            printf 'dhcp-option=tag:%s,option:router,%s\n' "$tag" "${SEGMENT_GATEWAYS[$i]}"
+            printf 'dhcp-option=tag:%s,option:dns-server,%s\n' "$tag" "${SEGMENT_GATEWAYS[$i]}"
+        done
+    } > "$DNSMASQ_FILE"
     chmod 600 "$DNSMASQ_FILE"
 }
 
 configure_network_manager() {
     command -v nmcli >/dev/null 2>&1 || return 0
     mkdir -p /etc/NetworkManager/conf.d
+    local unmanaged iface
     if [[ "$NETWORK_MODE" == "bridge" ]]; then
-        cat > /etc/NetworkManager/conf.d/90-enra-unmanaged.conf <<EOF
-[keyfile]
-unmanaged-devices=interface-name:$WIFI_IF;interface-name:$UPLINK_IF;interface-name:$BRIDGE_IF
-EOF
+        unmanaged="interface-name:$WIFI_IF;interface-name:$UPLINK_IF;interface-name:$BRIDGE_IF"
         nmcli device set "$UPLINK_IF" managed no >/dev/null 2>&1 || true
     else
-        cat > /etc/NetworkManager/conf.d/90-enra-unmanaged.conf <<EOF
-[keyfile]
-unmanaged-devices=interface-name:$WIFI_IF
-EOF
+        unmanaged="interface-name:${SEGMENT_IFACES[0]}"
+        for iface in "${SEGMENT_IFACES[@]:1}"; do
+            unmanaged+=";interface-name:$iface"
+        done
     fi
+    cat > /etc/NetworkManager/conf.d/90-enra-unmanaged.conf <<EOF
+[keyfile]
+unmanaged-devices=$unmanaged
+EOF
     nmcli general reload >/dev/null 2>&1 || true
-    nmcli device set "$WIFI_IF" managed no >/dev/null 2>&1 || true
+    if [[ "$NETWORK_MODE" == "bridge" ]]; then
+        nmcli device set "$WIFI_IF" managed no >/dev/null 2>&1 || true
+    else
+        for iface in "${SEGMENT_IFACES[@]}"; do
+            nmcli device set "$iface" managed no >/dev/null 2>&1 || true
+        done
+    fi
 }
 
 configure_networkd_unmanaged() {
     systemctl is-active --quiet systemd-networkd.service || return 0
     mkdir -p /etc/systemd/network
-    local iface="$WIFI_IF"
-    cat > "/etc/systemd/network/00-enra-$iface.network" <<EOF
-[Match]
-Name=$iface
-
-[Link]
-Unmanaged=yes
-EOF
+    local iface
+    local interfaces=()
     if [[ "$NETWORK_MODE" == "bridge" ]]; then
-        for iface in "$UPLINK_IF" "$BRIDGE_IF"; do
-            cat > "/etc/systemd/network/00-enra-$iface.network" <<EOF
+        interfaces=("$WIFI_IF" "$UPLINK_IF" "$BRIDGE_IF")
+    else
+        interfaces=("${SEGMENT_IFACES[@]}")
+    fi
+    for iface in "${interfaces[@]}"; do
+        cat > "/etc/systemd/network/00-enra-$iface.network" <<EOF
 [Match]
 Name=$iface
 
 [Link]
 Unmanaged=yes
 EOF
-        done
-    fi
+    done
     networkctl reload
-    networkctl reconfigure "$WIFI_IF" >/dev/null 2>&1 || true
-    [[ "$NETWORK_MODE" != "bridge" ]] || networkctl reconfigure "$UPLINK_IF" >/dev/null 2>&1 || true
+    for iface in "${interfaces[@]}"; do
+        networkctl reconfigure "$iface" >/dev/null 2>&1 || true
+    done
 }
-
 install_services() {
     local hostapd_bin dnsmasq_bin
     hostapd_bin="$(command -v hostapd)"
