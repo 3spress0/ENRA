@@ -28,6 +28,8 @@ sudo enra status
 - Configurable SSID, regulatory country, radio band, channel and upstream interface.
 - Uses an existing kernel driver where available; it does not assume every adapter is Realtek.
 - Optional RTL8821AU DKMS installation when USB ID **0bda:0811** is detected and no wireless interface exists.
+- Graceful warning and exit when no wireless interface is available; base dependencies remain installed.
+- Kernel-header fallback for DKMS builds. On Debian, if headers for the running kernel are unavailable, ENRA installs the current kernel and matching headers and asks for a reboot before continuing.
 - systemd services for startup and recovery.
 - Credentials stored in root-only files under **/etc/enra**.
 
@@ -97,7 +99,7 @@ WPA3 is the default. Linux alone does not guarantee WPA3 AP support. The adapter
 
 ## Setup behavior
 
-Setup detects the package manager, installs hostapd and wireless tools, discovers wireless interfaces and verifies AP mode. It then asks for network topology, interfaces, radio settings and security profile. It marks selected interfaces unmanaged in NetworkManager and systemd-networkd where those services are active. If ifupdown has an explicit stanza for a bridge port, setup stops rather than silently rewriting it.
+Setup detects the package manager, installs hostapd and wireless tools, discovers wireless interfaces and verifies AP mode. It then asks for network topology, interfaces, radio settings and security profile. It marks selected interfaces unmanaged in NetworkManager and systemd-networkd where those services are active. If ifupdown has an explicit stanza for a bridge port, setup stops rather than silently rewriting it. If no wireless interface is detected, setup prints a warning and exits without configuring services; connect the adapter/install its driver and rerun setup.
 
 ### Existing Debian + RTL8821AU + OPNsense setup
 
@@ -117,7 +119,7 @@ Do not select the Debian VMware NAT interface as the bridge port. In bridge mode
 
 ENRA uses an existing wireless interface and its kernel driver when one is available. It does not replace a working driver.
 
-If no wireless interface exists but USB ID **0bda:0811** is detected, setup tries the in-kernel **rtw88_8821au** module and then offers the out-of-tree RTL8821AU driver using DKMS. This is a targeted fallback, not a universal driver installer. For other adapters, install the correct driver and firmware through your distribution, verify the interface with **iw dev**, and rerun ENRA.
+If no wireless interface exists but USB ID **0bda:0811** is detected, setup installs the relevant firmware, tries the in-kernel **rtw88_8821au** module and then offers the out-of-tree RTL8821AU driver using DKMS. For DKMS, ENRA first attempts to install headers matching the running kernel. On Debian, if those headers are no longer available, it installs the current kernel and matching headers, pauses setup and asks you to reboot; rerun setup after reboot to build the driver. This is a targeted fallback, not a universal driver installer. For other adapters, install the correct driver and firmware through your distribution, verify the interface with **iw dev**, and rerun ENRA.
 
 The RTL8821AU maintainers recommend an in-kernel driver where available on modern kernels. See the [upstream README](https://github.com/morrownr/8821au-20210708) and [supported USB IDs](https://github.com/morrownr/8821au-20210708/blob/main/supported-device-IDs) before using the external driver.
 
