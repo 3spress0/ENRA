@@ -52,7 +52,7 @@ sudo ./enra.sh setup
 
 The setup is interactive. It installs the required packages and driver, detects the wireless interface, and asks which wired interface connects to the OPNsense LAN Segment.
 
-**Select only the dedicated OPNsense LAN Segment interface. Do not select the VMware NAT interface or the interface carrying Debian's default route.** ENRA rejects interfaces with a default route or a configured global IP address. The selected wired interface must not be used by another network manager or DHCP client.
+**Select only the dedicated OPNsense LAN Segment interface. Do not select the VMware NAT interface or the interface carrying Debian's default route.** ENRA rejects interfaces with a default route, a configured global IP address, an ifupdown stanza, or an existing bridge master. Before continuing, confirm that NetworkManager, systemd-networkd, or another DHCP client does not manage the selected interface.
 
 The installer asks for the SSID and WPA2 passphrase. The passphrase is stored in /etc/enra/hostapd.conf, which is readable only by root.
 
