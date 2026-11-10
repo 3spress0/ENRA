@@ -937,7 +937,7 @@ interface_is_excluded() {
     return 1
 }
 
-hotplug_add() {
+hotplug_add() (
     require_root hotplug-add
     require_systemd
     [[ "$#" -eq 1 ]] || die "Usage: sudo enra hotplug-add <interface>"
@@ -1069,7 +1069,7 @@ hotplug_add() {
     success "Automatically added $iface as ${SEGMENT_NAMES[$index]}."
     printf 'Gateway: %s/%s\nSubnet: %s\nDHCP: %s - %s\n' \
         "$gateway" "$prefix" "$network" "$dhcp_start" "$dhcp_end"
-}
+)
 
 scan_new_interfaces() {
     require_root hotplug-scan
@@ -1463,12 +1463,13 @@ validate() {
     printf 'Run "enra logs" for ENRA service logs.\n'
     return 1
 }
-logs() { journalctl -u enra-devices.service -u enra-network.service -u enra-ap.service -u enra-dnsmasq.service -n 120 --no-pager; }
+logs() { journalctl -u enra-devices.service -u enra-hotplug-scan.service -u enra-network.service -u enra-ap.service -u enra-dnsmasq.service -n 120 --no-pager; }
 start() {
     require_root start
     load_config
     systemctl start enra-devices.service enra-network.service enra-ap.service
     [[ "$NETWORK_MODE" != "routed" ]] || systemctl start enra-dnsmasq.service
+    systemctl start enra-hotplug-scan.service
 }
 stop() {
     require_root stop
