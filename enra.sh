@@ -49,6 +49,7 @@ require_systemd() {
 }
 load_config() {
     [[ -f "$CONFIG_FILE" ]] || die "ENRA is not configured. Run: sudo enra setup"
+    # shellcheck source=/etc/enra/enra.conf
     source "$CONFIG_FILE"
 }
 
@@ -565,9 +566,10 @@ driver_load() {
     require_root driver-load
     load_config
     if [[ -n "$DRIVER_MODULE" ]]; then modprobe "$DRIVER_MODULE"; fi
-    local attempt
-    for attempt in {1..20}; do
+    local remaining=20
+    while (( remaining > 0 )); do
         iw dev | awk '$1 == "Interface" {print $2}' | grep -Fxq "$WIFI_IF" && return 0
+        remaining=$((remaining - 1))
         sleep 1
     done
     die "Wireless interface $WIFI_IF did not appear."
