@@ -55,6 +55,7 @@ load_config() {
     source "$CONFIG_FILE"
     AUTO_UP_INTERFACES="${AUTO_UP_INTERFACES:-true}"
     AUTO_UP_EXCLUDE="${AUTO_UP_EXCLUDE:-}"
+    AUTO_ADD_INTERFACES="${AUTO_ADD_INTERFACES:-true}"
 
     # Migrate existing single-Wi-Fi routed configurations in memory.
     if [[ "$NETWORK_MODE" == "routed" && -z "${SEGMENT_IFACES+x}" ]]; then
@@ -505,16 +506,11 @@ write_config_array() {
 }
 
 
-write_configuration() {
-    local ssid_bytes
-    read -r -p "Wi-Fi network name [espers cool network]: " SSID
-    SSID="${SSID:-espers cool network}"
-    ssid_bytes="$(LC_ALL=C printf '%s' "$SSID" | wc -c)"
-    [[ "$ssid_bytes" -ge 1 && "$ssid_bytes" -le 32 ]] || die "SSID must contain 1-32 bytes."
-    [[ "$SSID" =~ ^[[:print:]]+$ ]] || die "SSID must contain printable ASCII characters."
-    SSID_HEX="$(printf '%s' "$SSID" | od -An -tx1 | tr -d ' \n')"
+save_main_config() {
+    local config_tmp
     mkdir -p "$CONFIG_DIR"
     chmod 700 "$CONFIG_DIR"
+    config_tmp="$(mktemp "$CONFIG_DIR/.enra.conf.XXXXXX")"
     {
         printf 'NETWORK_MODE=%q\nWIFI_IF=%q\nUPLINK_IF=%q\nSSID=%q\nSSID_HEX=%q\n' \
             "$NETWORK_MODE" "$WIFI_IF" "$UPLINK_IF" "$SSID" "$SSID_HEX"
@@ -522,8 +518,8 @@ write_configuration() {
         printf 'AP_GATEWAY=%q\nAP_PREFIX=%q\nAP_NETWORK=%q\n' "$AP_GATEWAY" "$AP_PREFIX" "$AP_NETWORK"
         printf 'DHCP_START=%q\nDHCP_END=%q\nDNS_UPSTREAM=%q\nDRIVER_MODULE=%q\n' \
             "$DHCP_START" "$DHCP_END" "$DNS_UPSTREAM" "${DRIVER_MODULE:-}"
-        printf 'AUTO_UP_INTERFACES=%q\nAUTO_UP_EXCLUDE=%q\n' \
-            "${AUTO_UP_INTERFACES:-true}" "${AUTO_UP_EXCLUDE:-}"
+        printf 'AUTO_UP_INTERFACES=%q\nAUTO_UP_EXCLUDE=%q\nAUTO_ADD_INTERFACES=%q\n' \
+            "${AUTO_UP_INTERFACES:-true}" "${AUTO_UP_EXCLUDE:-}" "${AUTO_ADD_INTERFACES:-true}"
         if [[ "$NETWORK_MODE" == "routed" ]]; then
             write_config_array SEGMENT_IFACES "${SEGMENT_IFACES[@]}"
             write_config_array SEGMENT_NAMES "${SEGMENT_NAMES[@]}"
@@ -533,8 +529,20 @@ write_configuration() {
             write_config_array SEGMENT_DHCP_STARTS "${SEGMENT_DHCP_STARTS[@]}"
             write_config_array SEGMENT_DHCP_ENDS "${SEGMENT_DHCP_ENDS[@]}"
         fi
-    } > "$CONFIG_FILE"
-    chmod 600 "$CONFIG_FILE"
+    } > "$config_tmp"
+    chmod 600 "$config_tmp"
+    mv -f -- "$config_tmp" "$CONFIG_FILE"
+}
+
+write_configuration() {
+    local ssid_bytes
+    read -r -p "Wi-Fi network name [espers cool network]: " SSID
+    SSID="${SSID:-espers cool network}"
+    ssid_bytes="$(LC_ALL=C printf '%s' "$SSID" | wc -c)"
+    [[ "$ssid_bytes" -ge 1 && "$ssid_bytes" -le 32 ]] || die "SSID must contain 1-32 bytes."
+    [[ "$SSID" =~ ^[[:print:]]+$ ]] || die "SSID must contain printable ASCII characters."
+    SSID_HEX="$(printf '%s' "$SSID" | od -An -tx1 | tr -d ' \n')"
+    save_main_config
     write_hostapd_config
     [[ "$NETWORK_MODE" != "routed" ]] || write_dnsmasq_config
     unset PASSPHRASE
@@ -656,6 +664,21 @@ ExecStart=/usr/local/sbin/enra devices-up
 [Install]
 WantedBy=multi-user.target
 EOF
+    cat > /etc/systemd/system/enra-hotplug@.service <<'EOF'
+[Unit]
+Description=ENRA automatic network segment for %I
+Requires=enra-network.service
+After=enra-network.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/enra hotplug-add %I
+EOF
+    install -d -m 0755 /etc/udev/rules.d
+    cat > /etc/udev/rules.d/90-enra-hotplug.rules <<'EOF'
+ACTION=="add", SUBSYSTEM=="net", KERNEL!="lo", TAG+="systemd", ENV{SYSTEMD_WANTS}+="enra-hotplug@%k.service"
+EOF
+    udevadm control --reload-rules 2>/dev/null || true
     cat > /etc/systemd/system/enra-network.service <<'EOF'
 [Unit]
 Description=ENRA network configuration
@@ -846,6 +869,184 @@ devices_up() {
     done
 
     log "Automatic interface bring-up completed ($count interface(s) processed)."
+}
+
+next_segment_network() {
+    python3 - "${SEGMENT_NETWORKS[@]}" <<'PY'
+import ipaddress
+import subprocess
+import sys
+
+used = [ipaddress.IPv4Network(value) for value in sys.argv[1:]]
+routes = subprocess.run(
+    ["ip", "-4", "route", "show", "table", "main"],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout
+
+for line in routes.splitlines():
+    fields = line.split()
+    if not fields:
+        continue
+    destination = fields[0]
+    if destination == "default":
+        continue
+    try:
+        used.append(ipaddress.IPv4Network(destination, strict=False))
+    except ValueError:
+        continue
+
+for second in range(60, 255):
+    for third in range(0, 256):
+        candidate = ipaddress.IPv4Network(f"10.{second}.{third}.0/24")
+        if not any(candidate.overlaps(network) for network in used):
+            print(candidate.with_prefixlen)
+            raise SystemExit(0)
+
+raise SystemExit("No unused automatic /24 subnet remains in 10.60.0.0/16 through 10.254.255.0/24.")
+PY
+}
+
+interface_is_excluded() {
+    local requested="$1" excluded
+    local -a excluded_ifaces=()
+    read -r -a excluded_ifaces <<< "${AUTO_UP_EXCLUDE//,/ }"
+    for excluded in "${excluded_ifaces[@]}"; do
+        [[ "$requested" != "$excluded" ]] || return 0
+    done
+    return 1
+}
+
+hotplug_add() {
+    require_root hotplug-add
+    require_systemd
+    [[ "$#" -eq 1 ]] || die "Usage: sudo enra hotplug-add <interface>"
+    local iface="$1" path index gateway prefix network dhcp_start dhcp_end
+    local config_backup dnsmasq_backup
+
+    install -d -m 0755 /run/lock
+    exec 9>/run/lock/enra-hotplug.lock
+    flock -w 60 9 || die "Timed out waiting for another ENRA interface update."
+
+    load_config
+    case "${AUTO_ADD_INTERFACES,,}" in
+        true|yes|1|on) ;;
+        *) log "Automatic NIC integration is disabled in $CONFIG_FILE."; return 0 ;;
+    esac
+    if [[ "$NETWORK_MODE" != "routed" ]]; then
+        log "Automatic NIC integration is only enabled in routed mode. Bridge mode remains unchanged."
+        return 0
+    fi
+
+    [[ "$iface" =~ ^[[:alnum:]_.:-]{1,15}$ ]] || {
+        warn "Ignoring unsupported interface name: $iface"
+        return 0
+    }
+    path="/sys/class/net/$iface"
+    [[ -d "$path" && -e "$path/device" ]] || return 0
+    [[ "$iface" != "$WIFI_IF" && "$iface" != "$UPLINK_IF" ]] || return 0
+    [[ "$(cat "$path/type" 2>/dev/null || echo 0)" == "1" ]] || return 0
+    if iw dev 2>/dev/null | awk '$1 == "Interface" {print $2}' | grep -Fxq "$iface"; then
+        return 0
+    fi
+    if interface_is_excluded "$iface"; then
+        log "Skipping excluded interface: $iface"
+        return 0
+    fi
+
+    for ((index = 0; index < ${#SEGMENT_IFACES[@]}; index++)); do
+        if [[ "$iface" == "${SEGMENT_IFACES[$index]}" ]]; then
+            if ip -4 -o address show dev "$iface" 2>/dev/null |
+                awk '{print $4}' | grep -Fxq "${SEGMENT_GATEWAYS[$index]}/${SEGMENT_PREFIXES[$index]}"; then
+                return 0
+            fi
+            log "Reactivating configured ENRA segment on $iface."
+            ip link set dev "$iface" up || die "Could not bring $iface up."
+            systemctl restart enra-network.service ||
+                die "Could not restore ENRA networking for $iface."
+            systemctl restart enra-dnsmasq.service ||
+                die "Could not restore ENRA DHCP/DNS for $iface."
+            return 0
+        fi
+    done
+
+    if (( ${#SEGMENT_IFACES[@]} >= 33 )); then
+        warn "ENRA already has its Wi-Fi segment and 32 Ethernet segments. Skipping $iface."
+        return 0
+    fi
+    [[ ! -L "$path/master" ]] || {
+        warn "Skipping $iface because it already belongs to a bridge or master."
+        return 0
+    }
+    if ip route show default | grep -Eq "(^|[[:space:]])dev[[:space:]]+$iface([[:space:]]|$)" ||
+       ip -6 route show default | grep -Eq "(^|[[:space:]])dev[[:space:]]+$iface([[:space:]]|$)"; then
+        warn "Skipping $iface because it carries a default route."
+        return 0
+    fi
+    if ip -o address show dev "$iface" scope global 2>/dev/null | grep -q .; then
+        warn "Skipping $iface because it already has a global IP address. Remove its existing network profile before ENRA claims it."
+        return 0
+    fi
+    if grep -RqsE "^[[:space:]]*(auto|allow-hotplug|iface)[[:space:]]+$iface([[:space:]]|$)" \
+        /etc/network/interfaces /etc/network/interfaces.d 2>/dev/null; then
+        warn "Skipping $iface because it has an ifupdown configuration."
+        return 0
+    fi
+
+    network="$(next_segment_network)" || die "Could not allocate an unused subnet for $iface."
+    gateway="${network%.*}.1"
+    prefix="${network##*/}"
+    dhcp_start="${network%.*}.50"
+    dhcp_end="${network%.*}.200"
+    index="${#SEGMENT_IFACES[@]}"
+    SEGMENT_IFACES+=("$iface")
+    SEGMENT_NAMES+=("Ethernet $index")
+    SEGMENT_GATEWAYS+=("$gateway")
+    SEGMENT_PREFIXES+=("$prefix")
+    SEGMENT_NETWORKS+=("$network")
+    SEGMENT_DHCP_STARTS+=("$dhcp_start")
+    SEGMENT_DHCP_ENDS+=("$dhcp_end")
+
+    config_backup="$(mktemp "$CONFIG_DIR/.enra.conf.backup.XXXXXX")"
+    dnsmasq_backup="$(mktemp "$CONFIG_DIR/.dnsmasq.conf.backup.XXXXXX")"
+    cp -a "$CONFIG_FILE" "$config_backup"
+    cp -a "$DNSMASQ_FILE" "$dnsmasq_backup"
+
+    if ! save_main_config || ! write_dnsmasq_config; then
+        cp -a "$config_backup" "$CONFIG_FILE"
+        cp -a "$dnsmasq_backup" "$DNSMASQ_FILE"
+        rm -f "$config_backup" "$dnsmasq_backup"
+        die "Could not save the new segment configuration. Previous configuration restored."
+    fi
+
+    configure_network_manager
+    configure_networkd_unmanaged
+    ip link set dev "$iface" up || {
+        cp -a "$config_backup" "$CONFIG_FILE"
+        cp -a "$dnsmasq_backup" "$DNSMASQ_FILE"
+        rm -f "$config_backup" "$dnsmasq_backup"
+        die "Could not bring $iface up. Previous configuration restored."
+    }
+
+    if ! systemctl restart enra-network.service ||
+       ! systemctl restart enra-dnsmasq.service; then
+        warn "Applying $iface failed. Restoring the previous ENRA configuration."
+        cp -a "$config_backup" "$CONFIG_FILE"
+        cp -a "$dnsmasq_backup" "$DNSMASQ_FILE"
+        load_config
+        configure_network_manager
+        configure_networkd_unmanaged
+        systemctl restart enra-network.service || warn "Network rollback failed; inspect ENRA logs."
+        systemctl restart enra-dnsmasq.service || warn "DHCP/DNS rollback failed; inspect ENRA logs."
+        rm -f "$config_backup" "$dnsmasq_backup"
+        die "Automatic integration of $iface failed. Previous configuration restored."
+    fi
+
+    rm -f "$config_backup" "$dnsmasq_backup"
+    success "Automatically added $iface as ${SEGMENT_NAMES[$index]}."
+    printf 'Gateway: %s/%s\nSubnet: %s\nDHCP: %s - %s\n' \
+        "$gateway" "$prefix" "$network" "$dhcp_start" "$dhcp_end"
 }
 
 network_up() {
@@ -1272,9 +1473,12 @@ Usage:
 
 Automatic interfaces:
   ENRA brings up detected hardware-backed network interfaces at boot.
-  Set AUTO_UP_INTERFACES=false in /etc/enra/enra.conf to disable it.
+  Set AUTO_UP_INTERFACES=false in /etc/enra/enra.conf to disable link bring-up.
+  Set AUTO_ADD_INTERFACES=false to disable automatic routed NIC integration.
   Set AUTO_UP_EXCLUDE="ens38 wlan1" to leave selected interfaces untouched.
-  This only raises link state; it does not assign IP addresses or DHCP.
+  Automatic segment integration is routed-mode only and requires an unconfigured
+  Ethernet NIC with no existing IP, master or default route.
+  ENRA assigns a free /24 subnet, DHCP, NAT and segment isolation.
 
 Network modes:
   bridge              Bridge Wi-Fi clients to an existing LAN/router
@@ -1303,6 +1507,7 @@ case "$ACTION" in
     start) start ;;
     stop) stop ;;
     devices-up) devices_up ;;
+    hotplug-add) hotplug_add "${@:2}" ;;
     network-up) network_up ;;
     network-down) network_down ;;
     driver-load) driver_load ;;
