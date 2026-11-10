@@ -76,10 +76,33 @@ install_packages() {
             apt-get install -y hostapd iw rfkill iproute2 usbutils wireless-regdb python3
             ;;
         apt:routed) apt-get install -y dnsmasq-base nftables ;;
-        apt:build) apt-get install -y build-essential bc dkms git "linux-headers-$(uname -r)" ;;
+        apt:build)
+            export DEBIAN_FRONTEND=noninteractive
+            if apt-get install -y build-essential bc dkms git "linux-headers-$(uname -r)"; then
+                return 0
+            fi
+            warn "Headers for the running kernel ($(uname -r)) are unavailable. Installing Debian's current kernel and matching headers instead."
+            apt-get install -y linux-image-amd64 linux-headers-amd64 build-essential bc dkms git ||
+                die "Could not install a supported Debian kernel and its build dependencies."
+            [[ -e "/lib/modules/$(uname -r)/build" ]] || {
+                warn "A newer kernel and matching headers are installed. Reboot, then rerun ENRA setup to build the Wi-Fi driver."
+                return 2
+            }
+            ;;
         dnf:base) dnf install -y hostapd iw rfkill iproute usbutils python3 ;;
         dnf:routed) dnf install -y dnsmasq nftables ;;
-        dnf:build) dnf install -y gcc make bc dkms git "kernel-devel-$(uname -r)" ;;
+        dnf:build)
+            if dnf install -y gcc make bc dkms git "kernel-devel-$(uname -r)"; then
+                return 0
+            fi
+            warn "Matching kernel-devel is unavailable. Installing the current kernel and development package."
+            dnf install -y kernel kernel-devel gcc make bc dkms git ||
+                die "Could not install kernel development dependencies."
+            [[ -e "/lib/modules/$(uname -r)/build" ]] || {
+                warn "A newer kernel and matching development files are installed. Reboot, then rerun ENRA setup."
+                return 2
+            }
+            ;;
         pacman:base) pacman -Sy --needed --noconfirm hostapd iw rfkill iproute2 usbutils python ;;
         pacman:routed) pacman -S --needed --noconfirm dnsmasq nftables ;;
         pacman:build) pacman -S --needed --noconfirm base-devel bc dkms git linux-headers ;;
@@ -88,7 +111,18 @@ install_packages() {
             zypper --non-interactive install --no-recommends hostapd iw rfkill iproute2 usbutils python3
             ;;
         zypper:routed) zypper --non-interactive install --no-recommends dnsmasq nftables ;;
-        zypper:build) zypper --non-interactive install --no-recommends gcc make bc dkms git "kernel-devel-$(uname -r)" ;;
+        zypper:build)
+            if zypper --non-interactive install --no-recommends gcc make bc dkms git "kernel-devel-$(uname -r)"; then
+                return 0
+            fi
+            warn "Matching kernel development files are unavailable. Install the current kernel and development packages."
+            zypper --non-interactive install --no-recommends kernel-default kernel-default-devel gcc make bc dkms git ||
+                die "Could not install kernel development dependencies."
+            [[ -e "/lib/modules/$(uname -r)/build" ]] || {
+                warn "A newer kernel and matching development files are installed. Reboot, then rerun ENRA setup."
+                return 2
+            }
+            ;;
     esac
 }
 
@@ -135,8 +169,11 @@ install_rtl8821au_firmware() {
 install_rtl8821au() {
     local kernel
     kernel="$(uname -r)"
-    install_packages build
-    [[ -e "/lib/modules/$kernel/build" ]] || die "Matching kernel headers unavailable for $kernel."
+    install_packages build || return $?
+    [[ -e "/lib/modules/$kernel/build" ]] || {
+        warn "Matching kernel headers are unavailable for $kernel."
+        return 2
+    }
     mkdir -p "$(dirname "$RTL8821AU_DIR")"
     if [[ ! -d "$RTL8821AU_DIR/.git" ]]; then
         git clone --depth 1 "$RTL8821AU_REPO" "$RTL8821AU_DIR"
@@ -154,7 +191,7 @@ install_rtl8821au() {
 }
 
 discover_driver() {
-    local usb_list="$1"
+    local usb_list="$1" result
     if [[ -n "$(wireless_list)" ]]; then return 0; fi
     if [[ "$usb_list" == *"0bda:0811"* ]]; then
         install_rtl8821au_firmware
@@ -164,12 +201,22 @@ discover_driver() {
         if [[ -n "$(wireless_list)" ]]; then return 0; fi
         warn "RTL8821AU USB adapter detected, but no wireless interface appeared."
         read -r -p "Install the upstream RTL8821AU DKMS driver? [y/N] " answer
-        [[ "$answer" =~ ^[Yy]$ ]] || die "Install a working driver/firmware, verify it with iw dev, then rerun ENRA."
-        install_rtl8821au
-        [[ -n "$(wireless_list)" ]] || die "No interface appeared after driver installation. Check dmesg and USB passthrough."
-        return 0
+        if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+            warn "Wireless driver installation skipped. Connect a supported adapter or install its driver, then rerun ENRA."
+            return 1
+        fi
+        if install_rtl8821au; then
+            [[ -n "$(wireless_list)" ]] && return 0
+            warn "The driver installed, but no wireless interface appeared. Check dmesg and USB passthrough."
+            return 1
+        else
+            result=$?
+            return "$result"
+        fi
     fi
-    die "No wireless interface found. Install the correct driver/firmware, verify it with iw dev, then rerun ENRA."
+    warn "No wireless interface found. ENRA has installed its base dependencies but cannot configure an access point yet."
+    warn "Connect a supported Wi-Fi adapter, install its Linux driver/firmware, verify with 'iw dev', then rerun ENRA."
+    return 1
 }
 
 choose_wireless_interface() {
@@ -482,7 +529,17 @@ setup() {
     command -v ip >/dev/null 2>&1 || die "iproute2 is required."
     local usb_list
     usb_list="$(lsusb 2>/dev/null || true)"
-    discover_driver "$usb_list"
+    if discover_driver "$usb_list"; then
+        :
+    else
+        local driver_result=$?
+        if [[ "$driver_result" -eq 2 ]]; then
+            warn "ENRA setup paused because a kernel update is required. Reboot and run './enra.sh setup' again."
+        else
+            warn "ENRA prerequisites are installed, but setup is not configured. Rerun './enra.sh setup' after resolving the wireless interface."
+        fi
+        return 0
+    fi
     choose_wireless_interface
     choose_network_mode
     configure_interfaces
