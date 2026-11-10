@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly ENRA_VERSION="0.2.2"
+readonly ENRA_VERSION="0.2.3"
 readonly CONFIG_DIR="/etc/enra"
 readonly CONFIG_FILE="$CONFIG_DIR/enra.conf"
 readonly HOSTAPD_FILE="$CONFIG_DIR/hostapd.conf"
@@ -712,6 +712,211 @@ status() {
     printf '\nNote: ENRA uses its own enra-ap.service and (in routed mode) enra-dnsmasq.service.\n'
     printf 'The distribution units hostapd.service and dnsmasq.service are not used by ENRA.\n'
 }
+
+validate_check() {
+    case "$1" in
+        pass) printf '  [PASS] %s\n' "$2" ;;
+        warn) printf '  [WARN] %s\n' "$2" ;;
+        fail) printf '  [FAIL] %s\n' "$2"; VALIDATE_FAILURES=$((VALIDATE_FAILURES + 1)) ;;
+    esac
+}
+
+validate_service() {
+    local label="$1" unit="$2" active enabled
+    if ! systemctl cat "$unit" >/dev/null 2>&1; then
+        validate_check fail "$label unit is missing: $unit"
+        return
+    fi
+    active="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    enabled="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+    if [[ "$active" == "active" ]]; then
+        validate_check pass "$label service is active."
+    else
+        validate_check fail "$label service is \${active:-unknown}. Inspect: journalctl -u $unit -n 60 --no-pager"
+    fi
+    case "$enabled" in
+        enabled|enabled-runtime) validate_check pass "$label service is enabled at boot." ;;
+        *) validate_check fail "$label service is not enabled at boot (state: \${enabled:-unknown})." ;;
+    esac
+}
+
+validate() {
+    require_root validate
+    require_systemd
+    VALIDATE_FAILURES=0
+    print_banner
+    printf 'ENRA configuration validation\n\n'
+
+    if [[ ! -r "$CONFIG_FILE" ]]; then
+        validate_check fail "Configuration file is missing or unreadable: $CONFIG_FILE"
+        printf '\nValidation result: FAIL - %s issue(s).\n' "$VALIDATE_FAILURES"
+        return 1
+    fi
+
+    # shellcheck source=/etc/enra/enra.conf
+    source "$CONFIG_FILE"
+
+    NETWORK_MODE="\${NETWORK_MODE:-}"
+    WIFI_IF="\${WIFI_IF:-}"
+    UPLINK_IF="\${UPLINK_IF:-}"
+    AP_GATEWAY="\${AP_GATEWAY:-}"
+    AP_PREFIX="\${AP_PREFIX:-}"
+    AP_NETWORK="\${AP_NETWORK:-}"
+
+    local item
+    for item in NETWORK_MODE WIFI_IF UPLINK_IF SSID SSID_HEX COUNTRY_CODE BAND CHANNEL SECURITY; do
+        [[ -n "\${!item:-}" ]] &&
+            validate_check pass "Configuration value $item is present." ||
+            validate_check fail "Configuration value $item is missing."
+    done
+
+    case "$NETWORK_MODE" in
+        bridge|routed) validate_check pass "Network mode is $NETWORK_MODE." ;;
+        *) validate_check fail "Invalid network mode: \${NETWORK_MODE:-unset}." ;;
+    esac
+
+    for item in ip iw hostapd systemctl; do
+        command -v "$item" >/dev/null 2>&1 &&
+            validate_check pass "Required command found: $item." ||
+            validate_check fail "Required command is missing: $item."
+    done
+
+    if [[ -n "$WIFI_IF" ]] && ip link show dev "$WIFI_IF" >/dev/null 2>&1; then
+        validate_check pass "Wireless interface exists: $WIFI_IF."
+        supports_ap_mode "$WIFI_IF" &&
+            validate_check pass "$WIFI_IF advertises AP mode." ||
+            validate_check fail "$WIFI_IF does not advertise AP mode."
+        if iw dev "$WIFI_IF" info 2>/dev/null | grep -qE '^[[:space:]]*type APstart() {
+    require_root start
+    load_config
+    systemctl start enra-network.service enra-ap.service
+    [[ "$NETWORK_MODE" != "routed" ]] || systemctl start enra-dnsmasq.service
+}
+stop() {
+    require_root stop
+    systemctl stop enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
+}
+usage() {
+    cat <<'EOF'
+ENRA - espress0's Network Routing Architecture
+
+Usage:
+  sudo enra setup     Interactive installation and configuration
+  sudo enra status    Show configuration and service health
+  sudo enra /validate  Check configuration, interfaces, firewall and services
+  sudo enra start     Start ENRA services
+  sudo enra stop      Stop ENRA services
+  sudo enra logs      Show ENRA service logs
+
+Network modes:
+  bridge              Bridge Wi-Fi clients to an existing LAN/router
+  routed              Create a separate IPv4 subnet with DHCP and NAT
+
+Security:
+  WPA3-Personal       SAE with required PMF
+  WPA2-Personal       PSK with AES/CCMP
+  Transition          WPA2/WPA3 mixed authentication
+
+Supported package families: Debian/Ubuntu, Fedora/RHEL, Arch and openSUSE.
+systemd and a wireless driver with AP-mode support are required.
+EOF
+}
+
+SELF_PATH="$(readlink -f "$0")"
+ACTION="${1:-help}"
+case "$ACTION" in
+    setup) setup ;;
+    status) status ;;
+    validate|/validate) validate ;;
+    logs) logs ;;
+    start) start ;;
+    stop) stop ;;
+    network-up) network_up ;;
+    network-down) network_down ;;
+    driver-load) driver_load ;;
+    help|-h|--help) usage ;;
+    *) usage; die "Unknown command: $ACTION" ;;
+esac
+; then
+            validate_check pass "$WIFI_IF is operating in AP mode."
+        else
+            validate_check warn "$WIFI_IF is not currently in AP mode. Check enra-ap.service."
+        fi
+    else
+        validate_check fail "Wireless interface is missing: \${WIFI_IF:-unset}."
+    fi
+
+    if [[ -n "$UPLINK_IF" ]] && ip link show dev "$UPLINK_IF" >/dev/null 2>&1; then
+        validate_check pass "Upstream interface exists: $UPLINK_IF."
+    else
+        validate_check fail "Upstream interface is missing: \${UPLINK_IF:-unset}."
+    fi
+
+    [[ -s "$HOSTAPD_FILE" ]] &&
+        validate_check pass "ENRA hostapd configuration exists." ||
+        validate_check fail "ENRA hostapd configuration is missing or empty: $HOSTAPD_FILE"
+
+    if [[ "$NETWORK_MODE" == "routed" ]]; then
+        for item in AP_GATEWAY AP_PREFIX AP_NETWORK DHCP_START DHCP_END DNS_UPSTREAM; do
+            [[ -n "\${!item:-}" ]] &&
+                validate_check pass "Routed setting $item is present." ||
+                validate_check fail "Routed setting $item is missing."
+        done
+
+        if command -v dnsmasq >/dev/null 2>&1; then
+            validate_check pass "dnsmasq executable is installed."
+            if [[ -s "$DNSMASQ_FILE" ]] && dnsmasq --test --conf-file="$DNSMASQ_FILE" >/dev/null 2>&1; then
+                validate_check pass "ENRA dnsmasq configuration passes its syntax check."
+            else
+                validate_check fail "ENRA dnsmasq configuration is missing or invalid: $DNSMASQ_FILE"
+            fi
+        else
+            validate_check fail "dnsmasq executable is missing (Debian package: dnsmasq-base)."
+        fi
+
+        if [[ -n "$WIFI_IF" && -n "$AP_GATEWAY" && -n "$AP_PREFIX" ]] &&
+           ip -4 -o address show dev "$WIFI_IF" 2>/dev/null | awk '{print $4}' | grep -Fxq "$AP_GATEWAY/$AP_PREFIX"; then
+            validate_check pass "AP gateway address $AP_GATEWAY/$AP_PREFIX is assigned."
+        else
+            validate_check fail "AP gateway address is not assigned to \${WIFI_IF:-the wireless interface}."
+        fi
+
+        [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)" == "1" ]] &&
+            validate_check pass "IPv4 forwarding is enabled." ||
+            validate_check fail "IPv4 forwarding is disabled."
+
+        nft list table inet enra >/dev/null 2>&1 &&
+            validate_check pass "ENRA nftables table is loaded." ||
+            validate_check fail "ENRA nftables table is missing. Check enra-network.service."
+
+        if [[ -n "$UPLINK_IF" ]] && ip route show default dev "$UPLINK_IF" 2>/dev/null | grep -q .; then
+            validate_check pass "Default route uses upstream interface $UPLINK_IF."
+        else
+            validate_check warn "No default route currently uses $UPLINK_IF; AP clients may not have internet access."
+        fi
+    elif [[ "$NETWORK_MODE" == "bridge" ]]; then
+        ip link show dev "$BRIDGE_IF" >/dev/null 2>&1 &&
+            validate_check pass "ENRA bridge exists: $BRIDGE_IF." ||
+            validate_check fail "ENRA bridge is missing: $BRIDGE_IF."
+    fi
+
+    printf '\nENRA-managed services:\n'
+    validate_service "Network" enra-network.service
+    validate_service "Access point" enra-ap.service
+    if [[ "$NETWORK_MODE" == "routed" ]]; then
+        validate_service "DHCP/DNS" enra-dnsmasq.service
+    fi
+
+    printf '\nValidation result: '
+    if (( VALIDATE_FAILURES == 0 )); then
+        printf 'PASS - no blocking issues found.\n'
+        return 0
+    fi
+    printf 'FAIL - %s issue(s) need attention.\n' "$VALIDATE_FAILURES"
+    printf 'Run "enra logs" for ENRA service logs.\n'
+    return 1
+}
+
 logs() { journalctl -u enra-network.service -u enra-ap.service -u enra-dnsmasq.service -n 120 --no-pager; }
 start() {
     require_root start
