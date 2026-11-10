@@ -729,18 +729,27 @@ setup() {
     success "ENRA setup completed."
     printf 'Mode: %s\nWireless interface: %s\nSSID: %s\nBand/channel: %s GHz / %s\nSecurity: %s\n' \
         "$NETWORK_MODE" "$WIFI_IF" "$SSID" "$BAND" "$CHANNEL" "$SECURITY"
+    if [[ "$NETWORK_MODE" == "routed" ]]; then
+        printf 'Routed segments: %s\n' "${#SEGMENT_IFACES[@]}"
+        local i
+        for ((i = 0; i < ${#SEGMENT_IFACES[@]}; i++)); do
+            printf '  %s: %s -> %s (%s)\n' "${SEGMENT_NAMES[$i]}" "${SEGMENT_IFACES[$i]}" \
+                "${SEGMENT_GATEWAYS[$i]}" "${SEGMENT_NETWORKS[$i]}"
+        done
+    fi
     printf 'ENRA services: enra-network.service, enra-ap.service'
     [[ "$NETWORK_MODE" != "routed" ]] || printf ', enra-dnsmasq.service'
     printf '\nRun "enra status" to inspect service health.\n'
 }
 
+
 network_up() {
     require_root network-up
     load_config
-    ip link show dev "$WIFI_IF" >/dev/null 2>&1 || die "Wireless interface not found: $WIFI_IF"
-    ip link set dev "$WIFI_IF" up
     if [[ "$NETWORK_MODE" == "bridge" ]]; then
+        ip link show dev "$WIFI_IF" >/dev/null 2>&1 || die "Wireless interface not found: $WIFI_IF"
         ip link show dev "$UPLINK_IF" >/dev/null 2>&1 || die "Bridge uplink not found: $UPLINK_IF"
+        ip link set dev "$WIFI_IF" up
         [[ -d "/sys/class/net/$BRIDGE_IF/bridge" ]] || ip link add name "$BRIDGE_IF" type bridge stp_state 0
         if [[ -L "/sys/class/net/$UPLINK_IF/master" ]]; then
             local master
@@ -751,39 +760,51 @@ network_up() {
         fi
         ip link set dev "$UPLINK_IF" up
         ip link set dev "$BRIDGE_IF" up
-    else
-        ip address replace "$AP_GATEWAY/$AP_PREFIX" dev "$WIFI_IF"
-        install -d -m 700 /run/enra
-        if [[ ! -f /run/enra/ip_forward.previous ]]; then
-            sysctl -n net.ipv4.ip_forward > /run/enra/ip_forward.previous
-            chmod 600 /run/enra/ip_forward.previous
-        fi
-        sysctl -w net.ipv4.ip_forward=1 >/dev/null
-        install -d -m 700 /run/enra
-        if nft list table inet enra >/dev/null 2>&1; then
-            [[ -f /run/enra/nft-table-owned ]] ||
-                die "The nftables table inet enra already exists and is not owned by this ENRA instance. Choose another table name or inspect the existing rules."
-            nft delete table inet enra
-            rm -f /run/enra/nft-table-owned
-        fi
-        nft -f - <<EOF
+        return 0
+    fi
+
+    local i iface segment_if_set="" segment_network_set="" separator=""
+    for ((i = 0; i < ${#SEGMENT_IFACES[@]}; i++)); do
+        iface="${SEGMENT_IFACES[$i]}"
+        ip link show dev "$iface" >/dev/null 2>&1 || die "ENRA segment interface not found: $iface"
+        ip link set dev "$iface" up
+        ip address replace "${SEGMENT_GATEWAYS[$i]}/${SEGMENT_PREFIXES[$i]}" dev "$iface"
+        segment_if_set+="$separator\\"$iface\\""
+        segment_network_set+="$separator${SEGMENT_NETWORKS[$i]}"
+        separator=", "
+    done
+
+    install -d -m 700 /run/enra
+    if [[ ! -f /run/enra/ip_forward.previous ]]; then
+        sysctl -n net.ipv4.ip_forward > /run/enra/ip_forward.previous
+        chmod 600 /run/enra/ip_forward.previous
+    fi
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+    if nft list table inet enra >/dev/null 2>&1; then
+        [[ -f /run/enra/nft-table-owned ]] ||
+            die "The nftables table inet enra already exists and is not owned by this ENRA instance. Inspect it before continuing."
+        nft delete table inet enra
+        rm -f /run/enra/nft-table-owned
+    fi
+
+    nft -f - <<EOF
 table inet enra {
     chain forward {
         type filter hook forward priority filter; policy accept;
-        iifname "$WIFI_IF" oifname "$UPLINK_IF" accept
-        iifname "$UPLINK_IF" oifname "$WIFI_IF" ct state established,related accept
-        iifname "$UPLINK_IF" oifname "$WIFI_IF" drop
-        iifname "$WIFI_IF" drop
+        ct state established,related accept
+        iifname { $segment_if_set } oifname "$UPLINK_IF" accept
+        iifname { $segment_if_set } drop
+        iifname "$UPLINK_IF" oifname { $segment_if_set } drop
     }
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
-        oifname "$UPLINK_IF" ip saddr $AP_NETWORK masquerade
+        oifname "$UPLINK_IF" ip saddr { $segment_network_set } masquerade
     }
 }
 EOF
-        touch /run/enra/nft-table-owned
-        chmod 600 /run/enra/nft-table-owned
-    fi
+    touch /run/enra/nft-table-owned
+    chmod 600 /run/enra/nft-table-owned
 }
 
 network_down() {
@@ -802,7 +823,11 @@ network_down() {
             nft list table inet enra >/dev/null 2>&1 && nft delete table inet enra || true
             rm -f /run/enra/nft-table-owned
         fi
-        ip address del "$AP_GATEWAY/$AP_PREFIX" dev "$WIFI_IF" 2>/dev/null || true
+        local iface i
+        for ((i = 0; i < ${#SEGMENT_IFACES[@]}; i++)); do
+            iface="${SEGMENT_IFACES[$i]}"
+            ip address del "${SEGMENT_GATEWAYS[$i]}/${SEGMENT_PREFIXES[$i]}" dev "$iface" 2>/dev/null || true
+        done
         if [[ -f /run/enra/ip_forward.previous ]]; then
             local previous_forward
             previous_forward="$(cat /run/enra/ip_forward.previous)"
@@ -813,7 +838,6 @@ network_down() {
         fi
     fi
 }
-
 driver_load() {
     require_root driver-load
     load_config
@@ -834,12 +858,25 @@ service_report() {
     printf '  %-26s %-12s (startup: %s)\n' "$label" "${active:-not-found}" "${enabled:-not-found}"
 }
 
+
 status() {
     print_banner
     [[ -f "$CONFIG_FILE" ]] || die "ENRA is not configured. Run: sudo enra setup"
     load_config
     printf 'Mode: %s\nWireless interface: %s\nUplink: %s\nSSID: %s\nBand/channel: %s GHz / %s\nSecurity: %s\n\n' \
         "$NETWORK_MODE" "$WIFI_IF" "$UPLINK_IF" "$SSID" "$BAND" "$CHANNEL" "$SECURITY"
+
+    if [[ "$NETWORK_MODE" == "routed" ]]; then
+        printf 'Routed network segments:\n'
+        local i
+        for ((i = 0; i < ${#SEGMENT_IFACES[@]}; i++)); do
+            printf '  %-16s %-12s gateway %-18s subnet %s\n' \
+                "${SEGMENT_NAMES[$i]}" "${SEGMENT_IFACES[$i]}" \
+                "${SEGMENT_GATEWAYS[$i]}" "${SEGMENT_NETWORKS[$i]}"
+            printf '    DHCP: %s - %s\n' "${SEGMENT_DHCP_STARTS[$i]}" "${SEGMENT_DHCP_ENDS[$i]}"
+        done
+        printf 'Upstream DNS: %s\n\n' "$DNS_UPSTREAM"
+    fi
 
     printf 'ENRA-managed services (active state and boot setting):\n'
     service_report "Network" enra-network.service
@@ -855,7 +892,6 @@ status() {
     printf '\nNote: ENRA uses its own enra-ap.service and (in routed mode) enra-dnsmasq.service.\n'
     printf 'The distribution units hostapd.service and dnsmasq.service are not used by ENRA.\n'
 }
-
 validate_check() {
     case "$1" in
         pass) printf '  [PASS] %s\n' "$2" ;;
@@ -883,6 +919,7 @@ validate_service() {
     esac
 }
 
+
 validate() {
     require_root validate
     require_systemd
@@ -896,17 +933,8 @@ validate() {
         return 1
     fi
 
-    # shellcheck source=/etc/enra/enra.conf
-    source "$CONFIG_FILE"
-
-    NETWORK_MODE="${NETWORK_MODE:-}"
-    WIFI_IF="${WIFI_IF:-}"
-    UPLINK_IF="${UPLINK_IF:-}"
-    AP_GATEWAY="${AP_GATEWAY:-}"
-    AP_PREFIX="${AP_PREFIX:-}"
-    AP_NETWORK="${AP_NETWORK:-}"
-
-    local item
+    load_config
+    local item i
     for item in NETWORK_MODE WIFI_IF UPLINK_IF SSID SSID_HEX COUNTRY_CODE BAND CHANNEL SECURITY; do
         [[ -n "${!item:-}" ]] &&
             validate_check pass "Configuration value $item is present." ||
@@ -949,10 +977,34 @@ validate() {
         validate_check fail "ENRA hostapd configuration is missing or empty: $HOSTAPD_FILE"
 
     if [[ "$NETWORK_MODE" == "routed" ]]; then
-        for item in AP_GATEWAY AP_PREFIX AP_NETWORK DHCP_START DHCP_END DNS_UPSTREAM; do
-            [[ -n "${!item:-}" ]] &&
-                validate_check pass "Routed setting $item is present." ||
-                validate_check fail "Routed setting $item is missing."
+        local segment_count="${#SEGMENT_IFACES[@]}"
+        (( segment_count > 0 )) &&
+            validate_check pass "Configured routed segments: $segment_count." ||
+            validate_check fail "No routed network segments are configured."
+
+        if [[ "$segment_count" -ne "${#SEGMENT_GATEWAYS[@]}" ||
+              "$segment_count" -ne "${#SEGMENT_PREFIXES[@]}" ||
+              "$segment_count" -ne "${#SEGMENT_NETWORKS[@]}" ||
+              "$segment_count" -ne "${#SEGMENT_DHCP_STARTS[@]}" ||
+              "$segment_count" -ne "${#SEGMENT_DHCP_ENDS[@]}" ]]; then
+            validate_check fail "Routed segment configuration arrays have different lengths."
+        fi
+
+        for ((i = 0; i < segment_count; i++)); do
+            if ip link show dev "${SEGMENT_IFACES[$i]}" >/dev/null 2>&1; then
+                validate_check pass "Segment ${SEGMENT_NAMES[$i]} interface exists: ${SEGMENT_IFACES[$i]}."
+            else
+                validate_check fail "Segment ${SEGMENT_NAMES[$i]} interface is missing: ${SEGMENT_IFACES[$i]}."
+            fi
+            if ip -4 -o address show dev "${SEGMENT_IFACES[$i]}" 2>/dev/null |
+                awk '{print $4}' | grep -Fxq "${SEGMENT_GATEWAYS[$i]}/${SEGMENT_PREFIXES[$i]}"; then
+                validate_check pass "Segment ${SEGMENT_NAMES[$i]} gateway ${SEGMENT_GATEWAYS[$i]}/${SEGMENT_PREFIXES[$i]} is assigned."
+            else
+                validate_check fail "Segment ${SEGMENT_NAMES[$i]} gateway is not assigned to ${SEGMENT_IFACES[$i]}."
+            fi
+            [[ -n "${SEGMENT_NETWORKS[$i]}" && -n "${SEGMENT_DHCP_STARTS[$i]}" && -n "${SEGMENT_DHCP_ENDS[$i]}" ]] &&
+                validate_check pass "Segment ${SEGMENT_NAMES[$i]} has a network and DHCP range." ||
+                validate_check fail "Segment ${SEGMENT_NAMES[$i]} has incomplete network settings."
         done
 
         if command -v dnsmasq >/dev/null 2>&1; then
@@ -966,13 +1018,6 @@ validate() {
             validate_check fail "dnsmasq executable is missing (Debian package: dnsmasq-base)."
         fi
 
-        if [[ -n "$WIFI_IF" && -n "$AP_GATEWAY" && -n "$AP_PREFIX" ]] &&
-           ip -4 -o address show dev "$WIFI_IF" 2>/dev/null | awk '{print $4}' | grep -Fxq "$AP_GATEWAY/$AP_PREFIX"; then
-            validate_check pass "AP gateway address $AP_GATEWAY/$AP_PREFIX is assigned."
-        else
-            validate_check fail "AP gateway address is not assigned to ${WIFI_IF:-the wireless interface}."
-        fi
-
         [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)" == "1" ]] &&
             validate_check pass "IPv4 forwarding is enabled." ||
             validate_check fail "IPv4 forwarding is disabled."
@@ -984,7 +1029,7 @@ validate() {
         if [[ -n "$UPLINK_IF" ]] && ip route show default dev "$UPLINK_IF" 2>/dev/null | grep -q .; then
             validate_check pass "Default route uses upstream interface $UPLINK_IF."
         else
-            validate_check warn "No default route currently uses $UPLINK_IF; AP clients may not have internet access."
+            validate_check warn "No default route currently uses $UPLINK_IF; routed clients may not have internet access."
         fi
     elif [[ "$NETWORK_MODE" == "bridge" ]]; then
         ip link show dev "$BRIDGE_IF" >/dev/null 2>&1 &&
@@ -1008,7 +1053,6 @@ validate() {
     printf 'Run "enra logs" for ENRA service logs.\n'
     return 1
 }
-
 logs() { journalctl -u enra-network.service -u enra-ap.service -u enra-dnsmasq.service -n 120 --no-pager; }
 start() {
     require_root start
