@@ -12,7 +12,7 @@ cd ENRA
 sudo ./enra.sh setup
 ```
 
-Setup is interactive. Choose **bridge** when an existing router handles DHCP and firewalling, or **routed** when ENRA should provide a separate IPv4 network with DHCP and NAT. WPA3-Personal is the default, but requires compatible Wi-Fi hardware, drivers, firmware and clients.
+Setup is interactive. Choose **bridge** when an existing router handles DHCP and firewalling, or **routed** when ENRA should provide multiple isolated IPv4 segments with DHCP and NAT. WPA3-Personal is the default, but requires compatible Wi-Fi hardware, drivers, firmware and clients.
 
 After setup:
 
