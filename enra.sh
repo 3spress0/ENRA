@@ -360,7 +360,7 @@ PY
 
 
 configure_interfaces() {
-    local segment_count selected i default_gateway gateway prefix start end network
+    local segment_count selected i default_gateway gateway prefix start end network existing
     if [[ "$NETWORK_MODE" == "bridge" ]]; then
         UPLINK_IF="$(choose_interface "Interface connected to the LAN being bridged" yes)"
         [[ "$UPLINK_IF" != "$WIFI_IF" ]] || die "Wired and wireless interfaces must be different."
@@ -1016,14 +1016,18 @@ validate() {
             validate_check pass "Configured routed segments: $segment_count." ||
             validate_check fail "No routed network segments are configured."
 
-        if [[ "$segment_count" -ne "${#SEGMENT_GATEWAYS[@]}" ||
+        local segment_arrays_valid=yes
+        if [[ "$segment_count" -ne "${#SEGMENT_NAMES[@]}" ||
+              "$segment_count" -ne "${#SEGMENT_GATEWAYS[@]}" ||
               "$segment_count" -ne "${#SEGMENT_PREFIXES[@]}" ||
               "$segment_count" -ne "${#SEGMENT_NETWORKS[@]}" ||
               "$segment_count" -ne "${#SEGMENT_DHCP_STARTS[@]}" ||
               "$segment_count" -ne "${#SEGMENT_DHCP_ENDS[@]}" ]]; then
             validate_check fail "Routed segment configuration arrays have different lengths."
+            segment_arrays_valid=no
         fi
 
+        if [[ "$segment_arrays_valid" == "yes" ]]; then
         for ((i = 0; i < segment_count; i++)); do
             if ip link show dev "${SEGMENT_IFACES[$i]}" >/dev/null 2>&1; then
                 validate_check pass "Segment ${SEGMENT_NAMES[$i]} interface exists: ${SEGMENT_IFACES[$i]}."
@@ -1040,6 +1044,7 @@ validate() {
                 validate_check pass "Segment ${SEGMENT_NAMES[$i]} has a network and DHCP range." ||
                 validate_check fail "Segment ${SEGMENT_NAMES[$i]} has incomplete network settings."
         done
+        fi
 
         if command -v dnsmasq >/dev/null 2>&1; then
             validate_check pass "dnsmasq executable is installed."
