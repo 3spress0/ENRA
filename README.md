@@ -35,7 +35,9 @@ sudo enra status
 - Graceful warning and exit when no wireless interface is available; base dependencies remain installed.
 - Kernel-header fallback for DKMS builds. On Debian, if headers for the running kernel are unavailable, ENRA installs the current kernel and matching headers and asks for a reboot before continuing.
 - Boot-time discovery and link bring-up for all detected hardware-backed network interfaces.
-- systemd services for device bring-up, network configuration, access-point startup and recovery.
+- Udev hotplug handling and boot-time reconciliation that add eligible Ethernet NICs as isolated routed segments automatically, up to the 32-segment limit.
+- Automatic subnet allocation, DHCP configuration, NAT and firewall isolation for newly added routed segments.
+- systemd services for device bring-up, hotplug integration, network configuration, access-point startup and recovery.
 - Installable **enra** command in **/usr/local/sbin**, plus a GitHub-based updater.
 - Credentials stored in root-only files under **/etc/enra**.
 
@@ -95,6 +97,10 @@ Clients -- segments --+-- Ethernet LAN 1 -- 10.43.0.0/24
 
 The Wi-Fi segment defaults to **10.42.0.1/24** with DHCP **10.42.0.50-10.42.0.200**. Additional Ethernet segments receive separate defaults (10.43.0.1/24, 10.44.0.1/24, and so on). These are suggestions only; setup lets you choose every gateway, prefix and DHCP range. Upstream DNS defaults to **1.1.1.1**. ENRA rejects overlapping segment subnets and subnets that conflict with existing routes. Each segment can reach the upstream interface, but cannot initiate connections to another ENRA segment. Unsolicited inbound connections from upstream are blocked; established return traffic is allowed.
 
+With **AUTO_ADD_INTERFACES=true**, ENRA watches network-device add events and performs a full NIC scan after network startup. In routed mode, a new eligible Ethernet NIC is assigned the first unused **10.60.0.0/24-10.254.255.0/24** subnet, with gateway **.1** and DHCP range **.50-.200**. ENRA persists the segment, updates dnsmasq, and rebuilds its nftables NAT/isolation rules. The feature never claims the configured Wi-Fi or upstream interface. NICs that already have a global IP, carry a default route, belong to another bridge/master, or have an ifupdown stanza are skipped. Removed NIC segments are pruned from the saved configuration when ENRA next starts its network service.
+
+Automatic routed integration is intentionally disabled in bridge mode. Additional bridge ports change Layer 2 trust boundaries and must be selected explicitly.
+
 ## Wireless security
 
 - **WPA3-Personal:** SAE with mandatory Protected Management Frames (PMF).
@@ -105,7 +111,7 @@ WPA3 is the default. Linux alone does not guarantee WPA3 AP support. The adapter
 
 ## Setup behavior
 
-Setup detects the package manager, installs hostapd and wireless tools, discovers wireless interfaces and verifies AP mode. Routed mode asks for one upstream interface, the Wi-Fi segment settings and a number of additional dedicated Ethernet segments. Each Ethernet segment is configured interactively with its own interface, gateway, subnet and DHCP range. ENRA marks all selected downstream interfaces unmanaged in NetworkManager and systemd-networkd where those services are active. If ifupdown has an explicit stanza for a bridge port, setup stops rather than silently rewriting it. If no wireless interface is detected, setup prints a warning and exits without configuring services; connect the adapter/install its driver and rerun setup.
+Setup detects the package manager, installs hostapd and wireless tools, discovers wireless interfaces and verifies AP mode. Routed mode asks for one upstream interface, the Wi-Fi segment settings and a number of additional dedicated Ethernet segments. Each manually selected Ethernet segment is configured with its own interface, gateway, subnet and DHCP range. After the core services start, ENRA scans for other eligible Ethernet NICs. A udev rule also handles NICs connected later. ENRA marks selected downstream interfaces unmanaged in NetworkManager and systemd-networkd where those services are active. If ifupdown has an explicit stanza for a bridge port, setup stops rather than silently rewriting it. If no wireless interface is detected, setup prints a warning and exits without configuring services; connect the adapter/install its driver and rerun setup.
 
 ### Existing Debian + RTL8821AU + OPNsense setup
 
@@ -154,17 +160,19 @@ sudo enra setup
 Use **`enra status`** to inspect the ENRA-owned service units, startup state, network addresses, wireless mode and recent logs. Checking `systemctl status hostapd` or `systemctl status dnsmasq` does not show ENRA service health.
 Use **`enra /validate`** to run read-only checks against the saved configuration, required commands, wireless AP capability/state, routed-mode dnsmasq configuration, gateway address, IPv4 forwarding, nftables table and ENRA-managed systemd services. It returns a non-zero exit status when a blocking check fails. The shorter alias **`enra validate`** is also accepted.
 
-ENRA uses its own systemd units: **enra-devices.service**, **enra-network.service** and **enra-ap.service**. Routed mode also uses **enra-dnsmasq.service**. Services are enabled during setup and start on boot. The device service runs after the network managers and udev settle, discovers hardware-backed interfaces under **/sys/class/net**, and sets their link state to UP. It excludes loopback and ENRA's bridge. The installer starts these units directly and does not depend on the distribution-provided **hostapd.service** or **dnsmasq.service**. On Debian, **hostapd.service** may be masked by the package and **dnsmasq-base** may not provide a **dnsmasq.service** unit; neither condition prevents ENRA from working. Do not unmask or start the distribution units to operate ENRA.
+ENRA uses its own systemd units: **enra-devices.service**, **enra-network.service**, **enra-ap.service** and **enra-hotplug-scan.service**. Routed mode also uses **enra-dnsmasq.service**. Services are enabled during setup and start on boot. The device service runs after the network managers and udev settle, discovers hardware-backed interfaces under **/sys/class/net**, and sets their link state to UP. The hotplug scan reconciles all current NICs after ENRA networking starts. The **enra-hotplug@.service** template handles later udev add events. The device service excludes loopback and ENRA's bridge. The installer starts these units directly and does not depend on the distribution-provided **hostapd.service** or **dnsmasq.service**. On Debian, **hostapd.service** may be masked by the package and **dnsmasq-base** may not provide a **dnsmasq.service** unit; neither condition prevents ENRA from working. Do not unmask or start the distribution units to operate ENRA.
 
 ## Configuration and limitations
 
 - Main configuration: **/etc/enra/enra.conf**. Use **sudo enra /config** to edit it, **sudo enra /config show** to display it, or **sudo enra /config path** to print its path. Edits are syntax-checked and backed up. The generated hostapd and dnsmasq files are separate; rerun setup to rebuild those profiles.
-- Automatic interface bring-up is enabled by default with **AUTO_UP_INTERFACES=true**. Set it to **false** to disable. Put space-separated or comma-separated interface names in **AUTO_UP_EXCLUDE** to leave specific adapters untouched.
-- Automatic bring-up changes link state only. It does not assign IP addresses, start DHCP clients, or create extra default routes. NetworkManager/systemd-networkd continue to handle interfaces they manage; ENRA assigns addresses only to interfaces in its selected topology.
+- Automatic interface bring-up is enabled by default with **AUTO_UP_INTERFACES=true**. Set it to **false** to disable link-state changes.
+- Automatic routed NIC integration is enabled by default with **AUTO_ADD_INTERFACES=true**. Set it to **false** to disable automatic segment creation. This feature only operates in routed mode.
+- Put space-separated or comma-separated interface names in **AUTO_UP_EXCLUDE** to keep specific adapters out of automatic bring-up and routed integration.
+- Automatic bring-up only changes link state. Automatic segment integration assigns a free /24 subnet, gateway, DHCP range, NAT and firewall isolation. It skips NICs with an existing global IP address, a default route, an existing bridge/master, or an ifupdown configuration. NetworkManager and systemd-networkd are marked unmanaged for interfaces ENRA claims.
 - hostapd credentials: **/etc/enra/hostapd.conf** (root-only).
 - Routed DHCP/DNS configuration: **/etc/enra/dnsmasq.conf** (root-only). ENRA intentionally stores these files under `/etc/enra`; it does not use `/etc/hostapd` or `/etc/dnsmasq.d`.
 - Configures 2.4 GHz and 5 GHz hostapd profiles. Actual channels depend on country, adapter and driver.
-- Routed mode provides IPv4 DHCP and NAT for the Wi-Fi segment and up to 32 additional dedicated Ethernet segments. IPv6 forwarding/firewalling is not configured.
+- Routed mode provides IPv4 DHCP and NAT for the Wi-Fi segment and up to 32 additional dedicated Ethernet segments. New eligible NICs can be added automatically; a segment for a NIC that disappears is pruned on the next ENRA network start. IPv6 forwarding/firewalling is not configured.
 - Additional routed Ethernet interfaces must be dedicated, available in the Linux system, not carry the default route and not have an unrelated global IP configuration. In a VM, attach each virtual NIC to the intended VMware network before running setup. A VMware LAN Segment is private to VMs connected to that segment; it is not a physical Ethernet port. For a physical LAN, use a bridged VMnet mapped to a separate host NIC or pass a USB Ethernet adapter through to the guest.
 - VLANs, 802.1X/RADIUS, captive portals, mesh, multi-AP roaming, per-client isolation and automatic channel selection are not implemented.
 - Bridge mode exposes the LAN according to the upstream router's policy; it does not create a guest-network security boundary.
