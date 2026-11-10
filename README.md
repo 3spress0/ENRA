@@ -23,7 +23,10 @@ sudo enra status
 ## Features
 
 - Interactive setup with wireless hardware and interface discovery.
-- Layer 2 bridge or routed/NAT access-point modes.
+- Layer 2 bridge mode or multi-segment routed/NAT mode.
+- Modular routed topology: one upstream interface, one Wi-Fi segment and up to 32 additional Ethernet segments.
+- Independent gateway, IPv4 subnet and DHCP pool for every routed segment.
+- Firewall isolation between routed segments, with shared upstream NAT and established return traffic.
 - WPA3-Personal (SAE), WPA2-Personal and WPA2/WPA3 transition security profiles.
 - Configurable SSID, regulatory country, radio band, channel and upstream interface.
 - Uses an existing kernel driver where available; it does not assume every adapter is Realtek.
@@ -71,23 +74,23 @@ The selected Ethernet interface becomes a bridge port and must not retain its ow
 
 ### Routed mode
 
-ENRA creates a separate IPv4 subnet on the Wi-Fi interface. It configures a gateway address, dnsmasq for DHCP/DNS forwarding, IP forwarding and nftables masquerading through an upstream interface.
+ENRA creates independent IPv4 subnets on the Wi-Fi interface and any number of dedicated Ethernet interfaces (up to 32 additional wired segments). Every segment has its own gateway address, subnet and DHCP pool. One dnsmasq instance serves all segment interfaces, while nftables isolates segments from each other and masquerades their traffic through the shared upstream interface.
 
 ~~~text
-Wi-Fi clients
-     |
-   hostapd
-     |
-  AP subnet
-     |
- dnsmasq + nftables
-     |
- Upstream interface
-     |
- Existing router / Internet
+                      +-- Wi-Fi AP ------- 10.42.0.0/24
+                      |
+Clients -- segments --+-- Ethernet LAN 1 -- 10.43.0.0/24
+                      |
+                      +-- Ethernet LAN 2 -- 10.44.0.0/24
+                              |
+                    dnsmasq + nftables
+                              |
+                       Shared upstream
+                              |
+                     Existing router / Internet
 ~~~
 
-Defaults are **10.42.0.1/24**, DHCP **10.42.0.50-10.42.0.200**, and upstream DNS **1.1.1.1**. Change these during setup. Confirm that the AP subnet does not overlap with upstream LAN or VPN routes. AP clients can initiate connections upstream; unsolicited connections from the upstream network to AP clients are blocked, while established return traffic is allowed.
+The Wi-Fi segment defaults to **10.42.0.1/24** with DHCP **10.42.0.50-10.42.0.200**. Additional Ethernet segments receive separate defaults (10.43.0.1/24, 10.44.0.1/24, and so on). These are suggestions only; setup lets you choose every gateway, prefix and DHCP range. Upstream DNS defaults to **1.1.1.1**. ENRA rejects overlapping segment subnets and subnets that conflict with existing routes. Each segment can reach the upstream interface, but cannot initiate connections to another ENRA segment. Unsolicited inbound connections from upstream are blocked; established return traffic is allowed.
 
 ## Wireless security
 
@@ -99,7 +102,7 @@ WPA3 is the default. Linux alone does not guarantee WPA3 AP support. The adapter
 
 ## Setup behavior
 
-Setup detects the package manager, installs hostapd and wireless tools, discovers wireless interfaces and verifies AP mode. It then asks for network topology, interfaces, radio settings and security profile. It marks selected interfaces unmanaged in NetworkManager and systemd-networkd where those services are active. If ifupdown has an explicit stanza for a bridge port, setup stops rather than silently rewriting it. If no wireless interface is detected, setup prints a warning and exits without configuring services; connect the adapter/install its driver and rerun setup.
+Setup detects the package manager, installs hostapd and wireless tools, discovers wireless interfaces and verifies AP mode. Routed mode asks for one upstream interface, the Wi-Fi segment settings and a number of additional dedicated Ethernet segments. Each Ethernet segment is configured interactively with its own interface, gateway, subnet and DHCP range. ENRA marks all selected downstream interfaces unmanaged in NetworkManager and systemd-networkd where those services are active. If ifupdown has an explicit stanza for a bridge port, setup stops rather than silently rewriting it. If no wireless interface is detected, setup prints a warning and exits without configuring services; connect the adapter/install its driver and rerun setup.
 
 ### Existing Debian + RTL8821AU + OPNsense setup
 
@@ -146,10 +149,11 @@ ENRA uses its own systemd units: **enra-network.service** and **enra-ap.service*
 - hostapd credentials: **/etc/enra/hostapd.conf** (root-only).
 - Routed DHCP/DNS configuration: **/etc/enra/dnsmasq.conf** (root-only). ENRA intentionally stores these files under `/etc/enra`; it does not use `/etc/hostapd` or `/etc/dnsmasq.d`.
 - Configures 2.4 GHz and 5 GHz hostapd profiles. Actual channels depend on country, adapter and driver.
-- Routed mode currently provides IPv4 DHCP and NAT. IPv6 forwarding/firewalling is not configured.
+- Routed mode provides IPv4 DHCP and NAT for the Wi-Fi segment and up to 32 additional dedicated Ethernet segments. IPv6 forwarding/firewalling is not configured.
+- Additional routed Ethernet interfaces must be dedicated, available in the Linux system, not carry the default route and not have an unrelated global IP configuration. In a VM, attach each virtual NIC to the intended VMware LAN Segment before running setup.
 - VLANs, 802.1X/RADIUS, captive portals, mesh, multi-AP roaming, per-client isolation and automatic channel selection are not implemented.
 - Bridge mode exposes the LAN according to the upstream router's policy; it does not create a guest-network security boundary.
-- Routed mode adds an ENRA-owned nftables table with forwarding and NAT rules for the AP subnet. Stopping ENRA removes that table and restores the prior IPv4 forwarding setting. Review existing firewall policies before enabling it.
+- Routed mode adds an ENRA-owned nftables table with forwarding and NAT rules for every configured segment. Segment-to-segment forwarding and unsolicited upstream-to-segment traffic are blocked. Stopping ENRA removes that table and restores the prior IPv4 forwarding setting. Review existing firewall policies before enabling it.
 - ENRA marks selected interfaces unmanaged in NetworkManager and systemd-networkd where available. Explicit ifupdown configurations are detected on bridge ports and cause setup to stop. Other third-party network managers or custom scripts must be reviewed manually.
 
 ## Development status
