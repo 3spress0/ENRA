@@ -34,7 +34,7 @@ Keep the Debian VM's VMware NAT adapter separate. The interface selected during 
 - Debian 13 minimal, systemd-based.
 - VMware Workstation virtual machine.
 - Realtek USB Wi-Fi adapter: **0bda:0811 (RTL8821AU)**.
-- hostapd with WPA2-Personal and AES/CCMP.
+- hostapd with WPA3-Personal (SAE), AES/CCMP and mandatory Protected Management Frames (PMF).
 - SSID default: **espers cool network**.
 - Regulatory domain: Netherlands (**NL**).
 - 2.4 GHz channel: 6.
@@ -54,7 +54,7 @@ The setup is interactive. It installs the required packages and driver, detects 
 
 **Select only the dedicated OPNsense LAN Segment interface. Do not select the VMware NAT interface or the interface carrying Debian's default route.** ENRA rejects interfaces with a default route, a configured global IP address, an ifupdown stanza, or an existing bridge master. Before continuing, confirm that NetworkManager, systemd-networkd, or another DHCP client does not manage the selected interface.
 
-The installer asks for the SSID and WPA2 passphrase. The passphrase is stored in /etc/enra/hostapd.conf, which is readable only by root.
+The installer asks for the SSID and WPA3 passphrase. The passphrase is stored in /etc/enra/hostapd.conf, which is readable only by root. The generated configuration is checked with hostapd before services are enabled.
 
 If matching headers for the currently running kernel are unavailable, the installer installs Debian's kernel and header metapackages and stops. Reboot, return to this directory, and run the setup command again.
 
@@ -87,4 +87,4 @@ The installer uses the in-kernel rtw88_8821au module when it is available and ad
 
 Use a unique WPA2 passphrase. The passphrase is stored locally in a root-only hostapd configuration file and must never be committed to this repository.
 
-The current initial release uses WPA2-Personal. WPA3 is intentionally not enabled.
+The initial release uses WPA3-Personal only (SAE). It requires client support for WPA3 and Protected Management Frames. WPA2 compatibility mode is not enabled.
