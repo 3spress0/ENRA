@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly ENRA_VERSION="0.2.1"
+readonly ENRA_VERSION="0.2.2"
 readonly CONFIG_DIR="/etc/enra"
 readonly CONFIG_FILE="$CONFIG_DIR/enra.conf"
 readonly HOSTAPD_FILE="$CONFIG_DIR/hostapd.conf"
@@ -555,18 +555,26 @@ setup() {
     configure_network_manager
     configure_networkd_unmanaged
     install_services
+    # Only ENRA-owned units are managed here. Debian may intentionally mask
+    # the vendor hostapd.service; ENRA runs hostapd directly via enra-ap.service.
+    systemctl unmask enra-network.service enra-ap.service enra-dnsmasq.service
+    systemctl daemon-reload
+    log "Enabling ENRA services..."
     systemctl enable enra-network.service enra-ap.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         systemctl enable enra-dnsmasq.service
     else
         systemctl disable enra-dnsmasq.service >/dev/null 2>&1 || true
     fi
-    systemctl restart enra-network.service || die "Network setup failed. Check journalctl -u enra-network."
+    log "Starting ENRA network service..."
+    systemctl restart enra-network.service || die "Network setup failed. Check journalctl -u enra-network.service."
+    log "Starting ENRA access point service..."
     systemctl restart enra-ap.service || {
         journalctl -u enra-ap.service -n 60 --no-pager || true
         die "hostapd failed. Check driver, firmware and AP-mode capabilities."
     }
     if [[ "$NETWORK_MODE" == "routed" ]]; then
+        log "Starting ENRA DHCP/DNS service..."
         systemctl restart enra-dnsmasq.service || {
             journalctl -u enra-dnsmasq.service -n 60 --no-pager || true
             die "ENRA DHCP/DNS service failed."
@@ -575,6 +583,9 @@ setup() {
     success "ENRA setup completed."
     printf 'Mode: %s\nWireless interface: %s\nSSID: %s\nBand/channel: %s GHz / %s\nSecurity: %s\n' \
         "$NETWORK_MODE" "$WIFI_IF" "$SSID" "$BAND" "$CHANNEL" "$SECURITY"
+    printf 'ENRA services: enra-network.service, enra-ap.service'
+    [[ "$NETWORK_MODE" != "routed" ]] || printf ', enra-dnsmasq.service'
+    printf '\nRun "enra status" to inspect service health.\n'
 }
 
 network_up() {
@@ -615,6 +626,7 @@ table inet enra {
         type filter hook forward priority filter; policy accept;
         iifname "$WIFI_IF" oifname "$UPLINK_IF" accept
         iifname "$UPLINK_IF" oifname "$WIFI_IF" ct state established,related accept
+        iifname "$UPLINK_IF" oifname "$WIFI_IF" drop
         iifname "$WIFI_IF" drop
     }
     chain postrouting {
@@ -669,19 +681,33 @@ driver_load() {
     die "Wireless interface $WIFI_IF did not appear."
 }
 
+service_report() {
+    local label="$1" unit="$2" active enabled
+    active="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    enabled="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+    printf '  %-26s %-12s (startup: %s)\n' "$label" "${active:-not-found}" "${enabled:-not-found}"
+}
+
 status() {
     print_banner
     [[ -f "$CONFIG_FILE" ]] || die "ENRA is not configured. Run: sudo enra setup"
     load_config
     printf 'Mode: %s\nWireless interface: %s\nUplink: %s\nSSID: %s\nBand/channel: %s GHz / %s\nSecurity: %s\n\n' \
         "$NETWORK_MODE" "$WIFI_IF" "$UPLINK_IF" "$SSID" "$BAND" "$CHANNEL" "$SECURITY"
-    printf 'Network service: '; systemctl is-active enra-network.service || true
-    printf 'Access point service: '; systemctl is-active enra-ap.service || true
+
+    printf 'ENRA-managed services (active state and boot setting):\n'
+    service_report "Network" enra-network.service
+    service_report "Access point (hostapd)" enra-ap.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
-        printf 'DHCP/DNS service: '; systemctl is-active enra-dnsmasq.service || true
+        service_report "DHCP/DNS (dnsmasq)" enra-dnsmasq.service
     fi
-    printf '\nNetwork links:\n'; ip -br link
-    printf '\nRecent hostapd log:\n'; journalctl -u enra-ap.service -n 12 --no-pager
+
+    printf '\nNetwork addresses:\n'; ip -br addr || true
+    printf '\nWireless interface state:\n'; iw dev || true
+    printf '\nENRA logs:\n'; journalctl -u enra-network.service -u enra-ap.service -u enra-dnsmasq.service -n 30 --no-pager || true
+
+    printf '\nNote: ENRA uses its own enra-ap.service and (in routed mode) enra-dnsmasq.service.\n'
+    printf 'The distribution units hostapd.service and dnsmasq.service are not used by ENRA.\n'
 }
 logs() { journalctl -u enra-network.service -u enra-ap.service -u enra-dnsmasq.service -n 120 --no-pager; }
 start() {
