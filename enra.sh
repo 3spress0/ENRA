@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly ENRA_VERSION="0.5.1"
+readonly ENRA_VERSION="0.6.0"
 readonly CONFIG_DIR="/etc/enra"
 readonly CONFIG_FILE="$CONFIG_DIR/enra.conf"
 readonly HOSTAPD_FILE="$CONFIG_DIR/hostapd.conf"
@@ -56,6 +56,7 @@ load_config() {
     AUTO_UP_INTERFACES="${AUTO_UP_INTERFACES:-true}"
     AUTO_UP_EXCLUDE="${AUTO_UP_EXCLUDE:-}"
     AUTO_ADD_INTERFACES="${AUTO_ADD_INTERFACES:-true}"
+    ALLOW_INTER_SEGMENT_TRAFFIC="${ALLOW_INTER_SEGMENT_TRAFFIC:-false}"
     case "${ALLOW_INTER_SEGMENT_TRAFFIC,,}" in
         true|yes|1|on) ALLOW_INTER_SEGMENT_TRAFFIC=true ;;
         false|no|0|off) ALLOW_INTER_SEGMENT_TRAFFIC=false ;;
@@ -1150,7 +1151,8 @@ network_up() {
         return 0
     fi
 
-    local i iface segment_if_set="" segment_network_set="" separator="" inter_segment_rule=""
+    local i iface segment_if_set="" segment_network_set="" separator=""
+    local anti_spoof_rules="" anti_spoof_separator="" inter_segment_rule=""
     for ((i = 0; i < ${#SEGMENT_IFACES[@]}; i++)); do
         iface="${SEGMENT_IFACES[$i]}"
         if [[ ! -d "/sys/class/net/$iface" ]]; then
@@ -1161,11 +1163,13 @@ network_up() {
         ip address replace "${SEGMENT_GATEWAYS[$i]}/${SEGMENT_PREFIXES[$i]}" dev "$iface"
         segment_if_set+="$separator\"$iface\""
         segment_network_set+="$separator${SEGMENT_NETWORKS[$i]}"
+        anti_spoof_rules+="$anti_spoof_separator"'iifname "'"$iface"'" meta nfproto ipv4 ip saddr != '"${SEGMENT_NETWORKS[$i]}"' drop'
+        anti_spoof_separator=$'\n        '
         separator=", "
     done
 
     if [[ "$ALLOW_INTER_SEGMENT_TRAFFIC" == "true" ]]; then
-        inter_segment_rule="iifname { $segment_if_set } oifname { $segment_if_set } accept"
+        inter_segment_rule="iifname { $segment_if_set } oifname { $segment_if_set } meta nfproto ipv4 accept"
     fi
 
     install -d -m 700 /run/enra
@@ -1186,11 +1190,12 @@ network_up() {
 table inet enra {
     chain forward {
         type filter hook forward priority filter; policy accept;
-        ct state established,related accept
+        $anti_spoof_rules
+        iifname { $segment_if_set } oifname "$UPLINK_IF" meta nfproto ipv4 accept
         $inter_segment_rule
-        iifname { $segment_if_set } oifname "$UPLINK_IF" accept
+        iifname "$UPLINK_IF" oifname { $segment_if_set } meta nfproto ipv4 ct state { established, related } ct direction reply accept
         iifname { $segment_if_set } drop
-        iifname "$UPLINK_IF" oifname { $segment_if_set } drop
+        oifname { $segment_if_set } drop
     }
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
@@ -1477,7 +1482,67 @@ start() {
 }
 stop() {
     require_root stop
-    systemctl stop enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
+    systemctl stop 'enra-hotplug@*.service' enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
+}
+disable_services() {
+    local -a units=()
+    local unit
+    for unit in enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service enra-devices.service; do
+        if systemctl cat "$unit" >/dev/null 2>&1; then
+            units+=("$unit")
+        fi
+    done
+    systemctl stop 'enra-hotplug@*.service' "${units[@]}" 2>/dev/null || true
+    if (("${#units[@]}" > 0)); then
+        systemctl disable "${units[@]}" >/dev/null || true
+    fi
+    rm -f /etc/udev/rules.d/90-enra-hotplug.rules
+    udevadm control --reload-rules 2>/dev/null || true
+}
+disable() {
+    require_root disable
+    require_systemd
+    disable_services
+    success "ENRA services disabled and stopped."
+    warn "Configuration and installed files were retained. Run 'sudo enra enable' to restore startup and hotplug handling."
+}
+enable() {
+    require_root enable
+    refresh
+}
+uninstall() {
+    require_root uninstall
+    require_systemd
+    local answer
+    read -r -p "Remove ENRA services, configuration, and installed commands? [y/N] " answer
+    [[ "$answer" =~ ^[Yy]$ ]] || {
+        log "Uninstall cancelled."
+        return 0
+    }
+
+    disable_services
+    rm -f /etc/systemd/system/enra-devices.service \
+        /etc/systemd/system/enra-hotplug@.service \
+        /etc/systemd/system/enra-hotplug-scan.service \
+        /etc/systemd/system/enra-network.service \
+        /etc/systemd/system/enra-ap.service \
+        /etc/systemd/system/enra-dnsmasq.service
+    rm -f /etc/NetworkManager/conf.d/90-enra-unmanaged.conf
+    rm -f /etc/systemd/network/00-enra-*.network
+    rm -rf "$CONFIG_DIR" /run/enra
+    rm -f /run/enra-dnsmasq.pid /run/lock/enra-hotplug.lock
+    rm -f "$INSTALLED_SCRIPT" "$UPDATE_SCRIPT"
+
+    if command -v nmcli >/dev/null 2>&1; then
+        nmcli general reload >/dev/null 2>&1 || true
+    fi
+    if systemctl is-active --quiet systemd-networkd.service 2>/dev/null; then
+        networkctl reload >/dev/null 2>&1 || true
+    fi
+    systemctl daemon-reload
+    udevadm control --reload-rules 2>/dev/null || true
+    success "ENRA services, configuration and installed commands were removed."
+    warn "Any separately installed Wi-Fi DKMS driver was left intact."
 }
 config() {
     require_root config
@@ -1568,7 +1633,10 @@ Usage:
   sudo enra /config show  Print the main ENRA configuration
   sudo enra update      Download and install the latest GitHub version
   sudo enra start       Start ENRA services
-  sudo enra stop        Stop ENRA services
+  sudo enra stop        Stop ENRA services for the current session
+  sudo enra disable     Stop services and disable boot/hotplug startup
+  sudo enra enable      Re-enable services and boot/hotplug startup
+  sudo enra uninstall   Remove ENRA (asks for confirmation)
   sudo enra logs        Show ENRA service logs
 
 Automatic interfaces:
@@ -1606,6 +1674,9 @@ case "$ACTION" in
     logs) logs ;;
     start) start ;;
     stop) stop ;;
+    disable) disable ;;
+    enable) enable ;;
+    uninstall) uninstall ;;
     devices-up) devices_up ;;
     hotplug-add) hotplug_add "${@:2}" ;;
     hotplug-scan) scan_new_interfaces ;;
