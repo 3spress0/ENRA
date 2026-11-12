@@ -56,9 +56,9 @@ load_config() {
     AUTO_UP_INTERFACES="${AUTO_UP_INTERFACES:-true}"
     AUTO_UP_EXCLUDE="${AUTO_UP_EXCLUDE:-}"
     AUTO_ADD_INTERFACES="${AUTO_ADD_INTERFACES:-true}"
-    case "${ALLOW_INTER_SEGMENT_TRAFFIC:-false}" in
-        true|TRUE|yes|YES|1|on|ON) ALLOW_INTER_SEGMENT_TRAFFIC=true ;;
-        false|FALSE|no|NO|0|off|OFF) ALLOW_INTER_SEGMENT_TRAFFIC=false ;;
+    case "${ALLOW_INTER_SEGMENT_TRAFFIC,,}" in
+        true|yes|1|on) ALLOW_INTER_SEGMENT_TRAFFIC=true ;;
+        false|no|0|off) ALLOW_INTER_SEGMENT_TRAFFIC=false ;;
         *) die "ALLOW_INTER_SEGMENT_TRAFFIC must be true or false." ;;
     esac
 
