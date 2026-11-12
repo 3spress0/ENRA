@@ -1538,6 +1538,7 @@ remove_segment() {
     dnsmasq_backup="$(mktemp "$CONFIG_DIR/.dnsmasq.conf.backup.XXXXXX")"
     cp -a "$CONFIG_FILE" "$config_backup"
     cp -a "$DNSMASQ_FILE" "$dnsmasq_backup"
+    expected_address="${SEGMENT_GATEWAYS[$index]}/${SEGMENT_PREFIXES[$index]}"
 
     SEGMENT_IFACES=("${SEGMENT_IFACES[@]:0:index}" "${SEGMENT_IFACES[@]:$((index + 1))}")
     SEGMENT_NAMES=("${SEGMENT_NAMES[@]:0:index}" "${SEGMENT_NAMES[@]:$((index + 1))}")
@@ -1568,7 +1569,6 @@ remove_segment() {
         die "Could not save the segment removal. Previous configuration restored."
     fi
 
-    expected_address="${SEGMENT_GATEWAYS[$index]}/${SEGMENT_PREFIXES[$index]}"
     if [[ -d "/sys/class/net/$iface" ]] &&
        ip -4 -o address show dev "$iface" 2>/dev/null |
            awk '{print $4}' | grep -Fxq "$expected_address"; then
