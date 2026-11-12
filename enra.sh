@@ -56,6 +56,11 @@ load_config() {
     AUTO_UP_INTERFACES="${AUTO_UP_INTERFACES:-true}"
     AUTO_UP_EXCLUDE="${AUTO_UP_EXCLUDE:-}"
     AUTO_ADD_INTERFACES="${AUTO_ADD_INTERFACES:-true}"
+    case "${ALLOW_INTER_SEGMENT_TRAFFIC:-false}" in
+        true|TRUE|yes|YES|1|on|ON) ALLOW_INTER_SEGMENT_TRAFFIC=true ;;
+        false|FALSE|no|NO|0|off|OFF) ALLOW_INTER_SEGMENT_TRAFFIC=false ;;
+        *) die "ALLOW_INTER_SEGMENT_TRAFFIC must be true or false." ;;
+    esac
 
     # Migrate existing single-Wi-Fi routed configurations in memory.
     if [[ "$NETWORK_MODE" == "routed" && -z "${SEGMENT_IFACES+x}" ]]; then
@@ -520,6 +525,7 @@ save_main_config() {
             "$DHCP_START" "$DHCP_END" "$DNS_UPSTREAM" "${DRIVER_MODULE:-}"
         printf 'AUTO_UP_INTERFACES=%q\nAUTO_UP_EXCLUDE=%q\nAUTO_ADD_INTERFACES=%q\n' \
             "${AUTO_UP_INTERFACES:-true}" "${AUTO_UP_EXCLUDE:-}" "${AUTO_ADD_INTERFACES:-true}"
+        printf 'ALLOW_INTER_SEGMENT_TRAFFIC=%q\n' "${ALLOW_INTER_SEGMENT_TRAFFIC:-false}"
         if [[ "$NETWORK_MODE" == "routed" ]]; then
             write_config_array SEGMENT_IFACES "${SEGMENT_IFACES[@]}"
             write_config_array SEGMENT_NAMES "${SEGMENT_NAMES[@]}"
@@ -1144,7 +1150,7 @@ network_up() {
         return 0
     fi
 
-    local i iface segment_if_set="" segment_network_set="" separator=""
+    local i iface segment_if_set="" segment_network_set="" separator="" inter_segment_rule=""
     for ((i = 0; i < ${#SEGMENT_IFACES[@]}; i++)); do
         iface="${SEGMENT_IFACES[$i]}"
         if [[ ! -d "/sys/class/net/$iface" ]]; then
@@ -1157,6 +1163,10 @@ network_up() {
         segment_network_set+="$separator${SEGMENT_NETWORKS[$i]}"
         separator=", "
     done
+
+    if [[ "$ALLOW_INTER_SEGMENT_TRAFFIC" == "true" ]]; then
+        inter_segment_rule="iifname { $segment_if_set } oifname { $segment_if_set } accept"
+    fi
 
     install -d -m 700 /run/enra
     if [[ ! -f /run/enra/ip_forward.previous ]]; then
@@ -1177,6 +1187,7 @@ table inet enra {
     chain forward {
         type filter hook forward priority filter; policy accept;
         ct state established,related accept
+        $inter_segment_rule
         iifname { $segment_if_set } oifname "$UPLINK_IF" accept
         iifname { $segment_if_set } drop
         iifname "$UPLINK_IF" oifname { $segment_if_set } drop
@@ -1247,8 +1258,8 @@ status() {
     print_banner
     [[ -f "$CONFIG_FILE" ]] || die "ENRA is not configured. Run: sudo enra setup"
     load_config
-    printf 'Mode: %s\nWireless interface: %s\nUplink: %s\nSSID: %s\nBand/channel: %s GHz / %s\nSecurity: %s\n\n' \
-        "$NETWORK_MODE" "$WIFI_IF" "$UPLINK_IF" "$SSID" "$BAND" "$CHANNEL" "$SECURITY"
+    printf 'Mode: %s\nWireless interface: %s\nUplink: %s\nSSID: %s\nBand/channel: %s GHz / %s\nSecurity: %s\nInter-segment traffic: %s\n\n' \
+        "$NETWORK_MODE" "$WIFI_IF" "$UPLINK_IF" "$SSID" "$BAND" "$CHANNEL" "$SECURITY" "$ALLOW_INTER_SEGMENT_TRAFFIC"
 
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         printf 'Routed network segments:\n'
@@ -1331,6 +1342,12 @@ validate() {
         bridge|routed) validate_check pass "Network mode is $NETWORK_MODE." ;;
         *) validate_check fail "Invalid network mode: ${NETWORK_MODE:-unset}." ;;
     esac
+
+    if [[ "$ALLOW_INTER_SEGMENT_TRAFFIC" == "true" ]]; then
+        validate_check pass "Inter-segment traffic is enabled."
+    else
+        validate_check pass "Inter-segment traffic is disabled (segments remain isolated)."
+    fi
 
     for item in ip iw hostapd systemctl; do
         command -v "$item" >/dev/null 2>&1 &&
