@@ -1446,6 +1446,21 @@ validate() {
             validate_check pass "ENRA nftables table is loaded." ||
             validate_check fail "ENRA nftables table is missing. Check enra-network.service."
 
+        local firewall_rules expected_spoof_rule
+        if firewall_rules="$(nft list chain inet enra forward 2>/dev/null)"; then
+            for ((i = 0; i < segment_count; i++)); do
+                [[ -d "/sys/class/net/${SEGMENT_IFACES[$i]}" ]] || continue
+                expected_spoof_rule="iifname \"${SEGMENT_IFACES[$i]}\" meta nfproto ipv4 ip saddr != ${SEGMENT_NETWORKS[$i]} drop"
+                if grep -Fq -- "$expected_spoof_rule" <<< "$firewall_rules"; then
+                    validate_check pass "IPv4 source validation is active on ${SEGMENT_IFACES[$i]}."
+                else
+                    validate_check fail "IPv4 source validation is missing on ${SEGMENT_IFACES[$i]}."
+                fi
+            done
+        else
+            validate_check fail "ENRA nftables forward chain is missing or unreadable."
+        fi
+
         if [[ -n "$UPLINK_IF" ]] && ip route show default dev "$UPLINK_IF" 2>/dev/null | grep -q .; then
             validate_check pass "Default route uses upstream interface $UPLINK_IF."
         else
