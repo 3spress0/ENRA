@@ -33,6 +33,7 @@ require_rule "Forwarding from segments to unauthorized interfaces is dropped" 'i
 reject_rule "No broad established-traffic accept bypasses segment isolation" 'ct state established,related accept'
 require_rule "Older configurations default inter-segment routing to disabled" 'ALLOW_INTER_SEGMENT_TRAFFIC="${ALLOW_INTER_SEGMENT_TRAFFIC:-false}"'
 require_rule "Disable, enable and uninstall commands are exposed" 'uninstall) uninstall ;;'
+require_rule "Validator inspects the active forwarding chain" 'nft list chain inet enra forward'
 require_rule "Hotplug does not restart a stopped network service" 'if ! systemctl is-active --quiet enra-network.service; then'
 
 hotplug_unit="$(sed -n '/Description=ENRA automatic network segment/,/\[Service\]/p' "$ENRA_SCRIPT")"
