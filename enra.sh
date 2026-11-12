@@ -1515,7 +1515,7 @@ remove_segment() {
     systemctl is-active --quiet enra-network.service ||
         die "ENRA networking is stopped. Start ENRA before removing a segment."
 
-    local iface="$1" index=-1 i excluded found=no
+    local iface="$1" index=-1 i excluded found=no answer
     local config_backup dnsmasq_backup expected_address
     local -a excluded_ifaces=()
     for ((i = 0; i < ${#SEGMENT_IFACES[@]}; i++)); do
@@ -1538,14 +1538,6 @@ remove_segment() {
     dnsmasq_backup="$(mktemp "$CONFIG_DIR/.dnsmasq.conf.backup.XXXXXX")"
     cp -a "$CONFIG_FILE" "$config_backup"
     cp -a "$DNSMASQ_FILE" "$dnsmasq_backup"
-
-    expected_address="${SEGMENT_GATEWAYS[$index]}/${SEGMENT_PREFIXES[$index]}"
-    if [[ -d "/sys/class/net/$iface" ]] &&
-       ip -4 -o address show dev "$iface" 2>/dev/null |
-           awk '{print $4}' | grep -Fxq "$expected_address"; then
-        ip address del "$expected_address" dev "$iface" ||
-            die "Could not remove ENRA address $expected_address from $iface."
-    fi
 
     SEGMENT_IFACES=("${SEGMENT_IFACES[@]:0:index}" "${SEGMENT_IFACES[@]:$((index + 1))}")
     SEGMENT_NAMES=("${SEGMENT_NAMES[@]:0:index}" "${SEGMENT_NAMES[@]:$((index + 1))}")
@@ -1574,6 +1566,18 @@ remove_segment() {
         cp -a "$dnsmasq_backup" "$DNSMASQ_FILE"
         rm -f "$config_backup" "$dnsmasq_backup"
         die "Could not save the segment removal. Previous configuration restored."
+    fi
+
+    expected_address="${SEGMENT_GATEWAYS[$index]}/${SEGMENT_PREFIXES[$index]}"
+    if [[ -d "/sys/class/net/$iface" ]] &&
+       ip -4 -o address show dev "$iface" 2>/dev/null |
+           awk '{print $4}' | grep -Fxq "$expected_address"; then
+        if ! ip address del "$expected_address" dev "$iface"; then
+            cp -a "$config_backup" "$CONFIG_FILE"
+            cp -a "$dnsmasq_backup" "$DNSMASQ_FILE"
+            rm -f "$config_backup" "$dnsmasq_backup"
+            die "Could not remove ENRA address $expected_address from $iface. Previous configuration restored."
+        fi
     fi
 
     rm -f "/etc/systemd/network/00-enra-$iface.network"
