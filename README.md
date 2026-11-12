@@ -162,6 +162,8 @@ curl -fsSL https://raw.githubusercontent.com/3spress0/ENRA/main/install.sh | sud
 sudo enra setup
 ~~~
 
+**Lifecycle commands:** `sudo enra stop` stops ENRA for the current session without changing boot startup. `sudo enra disable` stops services, disables boot startup and removes the hotplug udev rule while retaining configuration. `sudo enra start` starts ENRA for the current session and restores hotplug handling; `sudo enra enable` also enables boot startup. `sudo enra uninstall` asks for confirmation, then removes ENRA services, configuration and installed commands. A separately installed Wi-Fi DKMS driver is not removed.
+
 Use **`enra status`** to inspect the ENRA-owned service units, startup state, network addresses, wireless mode and recent logs. Checking `systemctl status hostapd` or `systemctl status dnsmasq` does not show ENRA service health.
 Use **`enra /validate`** to run read-only checks against the saved configuration, required commands, wireless AP capability/state, routed-mode dnsmasq configuration, gateway address, IPv4 forwarding, nftables table and ENRA-managed systemd services. It returns a non-zero exit status when a blocking check fails. The shorter alias **`enra validate`** is also accepted.
 
