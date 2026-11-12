@@ -190,4 +190,4 @@ ENRA uses its own systemd units: **enra-devices.service**, **enra-network.servic
 
 ## Development status
 
-ENRA is an early release. CI checks Bash syntax, ShellCheck and the expected firewall-policy rules, but does not emulate Wi-Fi hardware or verify actual packet forwarding. It has not been tested across every listed package family, kernel, adapter, security mode or topology. Issue reports should include distribution, kernel version, adapter chipset/USB ID, driver, network mode and relevant service logs.
+ENRA is an early release. CI checks Bash syntax, ShellCheck, firewall-policy structure and packet forwarding in Linux network namespaces. These tests verify routed IPv4 policy, upstream return traffic, segment isolation, source-address validation and IPv6 blocking, but do not emulate Wi-Fi hardware, hostapd or DHCP operation. ENRA has not been tested across every listed package family, kernel, adapter, security mode or topology. Issue reports should include distribution, kernel version, adapter chipset/USB ID, driver, network mode and relevant service logs.
