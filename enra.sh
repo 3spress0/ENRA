@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly ENRA_VERSION="0.5.0"
+readonly ENRA_VERSION="0.5.1"
 readonly CONFIG_DIR="/etc/enra"
 readonly CONFIG_FILE="$CONFIG_DIR/enra.conf"
 readonly HOSTAPD_FILE="$CONFIG_DIR/hostapd.conf"
