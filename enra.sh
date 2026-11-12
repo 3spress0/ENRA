@@ -1499,12 +1499,12 @@ disable_services() {
             units+=("$unit")
         fi
     done
+    rm -f /etc/udev/rules.d/90-enra-hotplug.rules
+    udevadm control --reload-rules 2>/dev/null || true
     systemctl stop 'enra-hotplug@*.service' "${units[@]}" 2>/dev/null || true
     if (("${#units[@]}" > 0)); then
         systemctl disable "${units[@]}" >/dev/null || true
     fi
-    rm -f /etc/udev/rules.d/90-enra-hotplug.rules
-    udevadm control --reload-rules 2>/dev/null || true
 }
 disable() {
     require_root disable
@@ -1520,7 +1520,14 @@ enable() {
 uninstall() {
     require_root uninstall
     require_systemd
-    local answer
+    local answer path iface
+    local -a networkd_ifaces=()
+    for path in /etc/systemd/network/00-enra-*.network; do
+        [[ -f "$path" ]] || continue
+        iface="${path##*/00-enra-}"
+        iface="${iface%.network}"
+        networkd_ifaces+=("$iface")
+    done
     read -r -p "Remove ENRA services, configuration, and installed commands? [y/N] " answer
     [[ "$answer" =~ ^[Yy]$ ]] || {
         log "Uninstall cancelled."
@@ -1545,6 +1552,9 @@ uninstall() {
     fi
     if systemctl is-active --quiet systemd-networkd.service 2>/dev/null; then
         networkctl reload >/dev/null 2>&1 || true
+        for iface in "${networkd_ifaces[@]}"; do
+            networkctl reconfigure "$iface" >/dev/null 2>&1 || true
+        done
     fi
     systemctl daemon-reload
     udevadm control --reload-rules 2>/dev/null || true
