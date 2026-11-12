@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly ENRA_VERSION="0.6.0"
+readonly ENRA_VERSION="0.6.1"
 readonly CONFIG_DIR="/etc/enra"
 readonly CONFIG_FILE="$CONFIG_DIR/enra.conf"
 readonly HOSTAPD_FILE="$CONFIG_DIR/hostapd.conf"
@@ -1506,6 +1506,105 @@ stop() {
     require_root stop
     systemctl stop 'enra-hotplug@*.service' enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
 }
+remove_segment() {
+    require_root remove-segment
+    require_systemd
+    [[ "$#" -eq 1 ]] || die "Usage: sudo enra remove-segment <ethernet-interface>"
+    load_config
+    [[ "$NETWORK_MODE" == "routed" ]] || die "Segment removal is only available in routed mode."
+    systemctl is-active --quiet enra-network.service ||
+        die "ENRA networking is stopped. Start ENRA before removing a segment."
+
+    local iface="$1" index=-1 i excluded found=no
+    local config_backup dnsmasq_backup expected_address
+    local -a excluded_ifaces=()
+    for ((i = 0; i < ${#SEGMENT_IFACES[@]}; i++)); do
+        if [[ "${SEGMENT_IFACES[$i]}" == "$iface" ]]; then
+            index="$i"
+            break
+        fi
+    done
+    (( index >= 1 )) ||
+        die "$iface is not a removable Ethernet segment. The Wi-Fi segment cannot be removed."
+
+    read -r -p "Remove routed segment $iface and exclude it from automatic discovery? [y/N] " answer
+    [[ "${answer:-}" =~ ^[Yy]$ ]] || {
+        log "Segment removal cancelled."
+        return 0
+    }
+
+    mkdir -p "$CONFIG_DIR"
+    config_backup="$(mktemp "$CONFIG_DIR/.enra.conf.backup.XXXXXX")"
+    dnsmasq_backup="$(mktemp "$CONFIG_DIR/.dnsmasq.conf.backup.XXXXXX")"
+    cp -a "$CONFIG_FILE" "$config_backup"
+    cp -a "$DNSMASQ_FILE" "$dnsmasq_backup"
+
+    expected_address="${SEGMENT_GATEWAYS[$index]}/${SEGMENT_PREFIXES[$index]}"
+    if [[ -d "/sys/class/net/$iface" ]] &&
+       ip -4 -o address show dev "$iface" 2>/dev/null |
+           awk '{print $4}' | grep -Fxq "$expected_address"; then
+        ip address del "$expected_address" dev "$iface" ||
+            die "Could not remove ENRA address $expected_address from $iface."
+    fi
+
+    SEGMENT_IFACES=("${SEGMENT_IFACES[@]:0:index}" "${SEGMENT_IFACES[@]:$((index + 1))}")
+    SEGMENT_NAMES=("${SEGMENT_NAMES[@]:0:index}" "${SEGMENT_NAMES[@]:$((index + 1))}")
+    SEGMENT_GATEWAYS=("${SEGMENT_GATEWAYS[@]:0:index}" "${SEGMENT_GATEWAYS[@]:$((index + 1))}")
+    SEGMENT_PREFIXES=("${SEGMENT_PREFIXES[@]:0:index}" "${SEGMENT_PREFIXES[@]:$((index + 1))}")
+    SEGMENT_NETWORKS=("${SEGMENT_NETWORKS[@]:0:index}" "${SEGMENT_NETWORKS[@]:$((index + 1))}")
+    SEGMENT_DHCP_STARTS=("${SEGMENT_DHCP_STARTS[@]:0:index}" "${SEGMENT_DHCP_STARTS[@]:$((index + 1))}")
+    SEGMENT_DHCP_ENDS=("${SEGMENT_DHCP_ENDS[@]:0:index}" "${SEGMENT_DHCP_ENDS[@]:$((index + 1))}")
+
+    SEGMENT_NAMES=("Wi-Fi")
+    for ((i = 1; i < ${#SEGMENT_IFACES[@]}; i++)); do
+        SEGMENT_NAMES+=("Ethernet $i")
+    done
+
+    read -r -a excluded_ifaces <<< "${AUTO_UP_EXCLUDE//,/ }"
+    for excluded in "${excluded_ifaces[@]}"; do
+        [[ "$excluded" != "$iface" ]] || found=yes
+    done
+    if [[ "$found" == "no" ]]; then
+        excluded_ifaces+=("$iface")
+    fi
+    AUTO_UP_EXCLUDE="${excluded_ifaces[*]}"
+
+    if ! save_main_config || ! write_dnsmasq_config; then
+        cp -a "$config_backup" "$CONFIG_FILE"
+        cp -a "$dnsmasq_backup" "$DNSMASQ_FILE"
+        rm -f "$config_backup" "$dnsmasq_backup"
+        die "Could not save the segment removal. Previous configuration restored."
+    fi
+
+    rm -f "/etc/systemd/network/00-enra-$iface.network"
+    configure_network_manager
+    configure_networkd_unmanaged
+    if command -v nmcli >/dev/null 2>&1; then
+        nmcli device set "$iface" managed yes >/dev/null 2>&1 || true
+    fi
+    if systemctl is-active --quiet systemd-networkd.service 2>/dev/null; then
+        networkctl reload >/dev/null 2>&1 || true
+        networkctl reconfigure "$iface" >/dev/null 2>&1 || true
+    fi
+
+    if ! systemctl restart enra-network.service ||
+       ! systemctl restart enra-dnsmasq.service; then
+        warn "Applying segment removal failed. Restoring the previous ENRA configuration."
+        cp -a "$config_backup" "$CONFIG_FILE"
+        cp -a "$dnsmasq_backup" "$DNSMASQ_FILE"
+        load_config
+        configure_network_manager
+        configure_networkd_unmanaged
+        systemctl restart enra-network.service || warn "Network rollback failed; inspect ENRA logs."
+        systemctl restart enra-dnsmasq.service || warn "DHCP/DNS rollback failed; inspect ENRA logs."
+        rm -f "$config_backup" "$dnsmasq_backup"
+        die "Segment removal failed. The previous ENRA configuration was restored."
+    fi
+
+    rm -f "$config_backup" "$dnsmasq_backup"
+    success "Removed Ethernet segment $iface."
+    log "$iface was added to AUTO_UP_EXCLUDE to prevent automatic re-addition."
+}
 disable_services() {
     local -a units=()
     local unit
@@ -1669,6 +1768,7 @@ Usage:
   sudo enra disable     Stop services and disable boot/hotplug startup
   sudo enra enable      Re-enable services and boot/hotplug startup
   sudo enra uninstall   Remove ENRA (asks for confirmation)
+  sudo enra remove-segment <iface> Remove an Ethernet segment safely
   sudo enra logs        Show ENRA service logs
 
 Automatic interfaces:
@@ -1709,6 +1809,7 @@ case "$ACTION" in
     disable) disable ;;
     enable) enable ;;
     uninstall) uninstall ;;
+    remove-segment) remove_segment "${@:2}" ;;
     devices-up) devices_up ;;
     hotplug-add) hotplug_add "${@:2}" ;;
     hotplug-scan) scan_new_interfaces ;;
