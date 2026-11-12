@@ -20,14 +20,15 @@ jobs:
         run: bash -n enra.sh install.sh update.sh tests/check-firewall-policy.sh tests/integration-firewall.sh
 
       - name: Check firewall policy contract
-        run: |
-          bash tests/check-firewall-policy.sh
-          sudo bash tests/integration-firewall.sh
+        run: bash tests/check-firewall-policy.sh
 
-      - name: Install ShellCheck
+      - name: Install test dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck nftables iproute2 iputils-ping
+
+      - name: Run packet-level firewall integration tests
+        run: sudo bash tests/integration-firewall.sh
 
       - name: Lint setup script
         run: shellcheck --severity=warning enra.sh install.sh update.sh tests/check-firewall-policy.sh tests/integration-firewall.sh
