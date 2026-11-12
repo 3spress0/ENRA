@@ -37,9 +37,9 @@ require_rule "Hotplug does not restart a stopped network service" 'if ! systemct
 
 hotplug_unit="$(sed -n '/Description=ENRA automatic network segment/,/\[Service\]/p' "$ENRA_SCRIPT")"
 if grep -Fq 'Requires=' <<< "$hotplug_unit"; then
-    printf '[FAIL] Hotplug unit must not force-start ENRA networking\\n' >&2
+    printf '[FAIL] Hotplug unit must not force-start ENRA networking\n' >&2
     exit 1
 fi
-printf '[PASS] Hotplug unit does not force-start ENRA networking\\n'
+printf '[PASS] Hotplug unit does not force-start ENRA networking\n'
 
 printf 'Firewall policy checks passed. Packet-level behaviour still requires integration testing.\n'
