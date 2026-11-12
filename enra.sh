@@ -674,7 +674,6 @@ EOF
     cat > /etc/systemd/system/enra-hotplug@.service <<'EOF'
 [Unit]
 Description=ENRA automatic network segment for %I
-Requires=enra-network.service
 After=enra-network.service
 
 [Service]
@@ -973,6 +972,10 @@ hotplug_add() (
     flock -w 60 9 || die "Timed out waiting for another ENRA interface update."
 
     load_config
+    if ! systemctl is-active --quiet enra-network.service; then
+        log "ENRA network service is not active; ignoring hotplug event."
+        return 0
+    fi
     case "${AUTO_ADD_INTERFACES,,}" in
         true|yes|1|on) ;;
         *) log "Automatic NIC integration is disabled in $CONFIG_FILE."; return 0 ;;
@@ -1475,7 +1478,11 @@ validate() {
 logs() { journalctl -u enra-devices.service -u enra-hotplug-scan.service -u enra-network.service -u enra-ap.service -u enra-dnsmasq.service -n 120 --no-pager; }
 start() {
     require_root start
+    require_systemd
     load_config
+    install_services
+    systemctl daemon-reload
+    udevadm control --reload-rules 2>/dev/null || true
     systemctl start enra-devices.service enra-network.service enra-ap.service
     [[ "$NETWORK_MODE" != "routed" ]] || systemctl start enra-dnsmasq.service
     systemctl start enra-hotplug-scan.service
