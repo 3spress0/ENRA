@@ -99,7 +99,7 @@ Clients -- segments --+-- Ethernet LAN 1 -- 10.43.0.0/24
 
 The Wi-Fi segment defaults to **10.42.0.1/24** with DHCP **10.42.0.50-10.42.0.200**. Additional Ethernet segments receive separate defaults (10.43.0.1/24, 10.44.0.1/24, and so on). These are suggestions only; setup lets you choose every gateway, prefix and DHCP range. Upstream DNS defaults to **1.1.1.1**. ENRA rejects overlapping segment subnets and subnets that conflict with existing routes. By default, each segment can reach the upstream interface but cannot initiate connections to another ENRA segment. Set **ALLOW_INTER_SEGMENT_TRAFFIC=true** in **/etc/enra/enra.conf** to allow IPv4 routing between all ENRA segments. The firewall accepts upstream-to-segment packets only when conntrack identifies them as replies to connections initiated by a segment. New connections from the upstream interface and forwarding through other interfaces into ENRA segments are blocked. Source addresses on each segment are checked against that segment's configured subnet. IPv6 forwarding through ENRA segments is blocked.
 
-With **AUTO_ADD_INTERFACES=true**, ENRA watches network-device add events and performs a full NIC scan after network startup. In routed mode, a new eligible Ethernet NIC is assigned the first unused **10.60.0.0/24-10.254.255.0/24** subnet, with gateway **.1** and DHCP range **.50-.200**. ENRA persists the segment, updates dnsmasq, and rebuilds its nftables NAT/isolation rules. The feature never claims the configured Wi-Fi or upstream interface. NICs that already have a global IP, carry a default route, belong to another bridge/master, or have an ifupdown stanza are skipped. If a configured NIC is temporarily absent, ENRA preserves its subnet and skips that port until it returns; the same segment is restored when the NIC reappears. Remove permanently retired segments manually through **sudo enra /config**.
+With **AUTO_ADD_INTERFACES=true**, ENRA watches network-device add events and performs a full NIC scan after network startup. In routed mode, a new eligible Ethernet NIC is assigned the first unused **10.60.0.0/24-10.254.255.0/24** subnet, with gateway **.1** and DHCP range **.50-.200**. ENRA persists the segment, updates dnsmasq, and rebuilds its nftables NAT/isolation rules. The feature never claims the configured Wi-Fi or upstream interface. NICs that already have a global IP, carry a default route, belong to another bridge/master, or have an ifupdown stanza are skipped. If a configured NIC is temporarily absent, ENRA preserves its subnet and skips that port until it returns; the same segment is restored when the NIC reappears. Remove a permanently retired segment with **sudo enra remove-segment <interface>**. ENRA removes its address, DHCP settings and firewall membership, then adds the interface to **AUTO_UP_EXCLUDE** so it is not automatically re-added. Remove it from that exclusion setting before enrolling it again.
 
 Automatic routed integration is intentionally disabled in bridge mode. Additional bridge ports change Layer 2 trust boundaries and must be selected explicitly.
 
@@ -152,6 +152,7 @@ sudo enra stop
 sudo enra disable
 sudo enra enable
 sudo enra uninstall
+sudo enra remove-segment enp3s0
 sudo enra logs
 ~~~
 
