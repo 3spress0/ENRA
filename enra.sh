@@ -868,6 +868,21 @@ EOF
 ACTION=="add", SUBSYSTEM=="net", KERNEL!="lo", TAG+="systemd", ENV{SYSTEMD_WANTS}+="enra-hotplug@%k.service"
 EOF
     udevadm control --reload-rules 2>/dev/null || true
+    cat > /etc/systemd/system/enra-link-monitor.service <<'EOF'
+[Unit]
+Description=ENRA monitor for network adapter and carrier changes
+Wants=network-pre.target
+After=network-pre.target systemd-udevd.service enra-devices.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/enra monitor-links
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
     cat > /etc/systemd/system/enra-network.service <<'EOF'
 [Unit]
 Description=ENRA network configuration
@@ -1319,14 +1334,7 @@ scan_new_interfaces() {
 }
 
 configured_interfaces_ready() {
-    local iface ready=yes
-    for iface in "$WIFI_IF" "$UPLINK_IF"; do
-        if [[ -z "$iface" ]] || ! ip link show dev "$iface" >/dev/null 2>&1; then
-            warn "Required ENRA interface is unavailable: ${iface:-unset}."
-            ready=no
-        fi
-    done
-    [[ "$ready" == "yes" ]]
+    resolve_configured_interfaces
 }
 
 preflight() {
@@ -1334,6 +1342,72 @@ preflight() {
     load_config
     configured_interfaces_ready || return 1
 }
+
+reconcile() (
+    require_root reconcile
+    require_systemd
+    [[ -r "$CONFIG_FILE" ]] || return 0
+
+    install -d -m 0755 /run/lock
+    exec 8>/run/lock/enra-reconcile.lock
+    flock -n 8 || return 0
+
+    load_config
+    if ! configured_interfaces_ready; then
+        warn "ENRA is degraded: required wireless hardware is unavailable (or the bridge uplink is missing). Stopping only dependent ENRA services."
+        systemctl stop enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
+        return 0
+    fi
+
+    systemctl start enra-devices.service || warn "Could not start ENRA device bring-up service."
+    ip link set dev "$WIFI_IF" up || {
+        warn "Could not bring Wi-Fi interface $WIFI_IF up. Waiting for the next device event."
+        return 0
+    }
+
+    systemctl reset-failed enra-network.service enra-ap.service enra-dnsmasq.service enra-hotplug-scan.service 2>/dev/null || true
+    if ! systemctl is-active --quiet enra-network.service; then
+        systemctl start enra-network.service || {
+            warn "ENRA network configuration could not start. Inspect 'enra logs'."
+            return 0
+        }
+    fi
+    if ! systemctl is-active --quiet enra-ap.service; then
+        systemctl start enra-ap.service || {
+            warn "ENRA access point could not start. Inspect 'enra logs'."
+            return 0
+        }
+    fi
+    if [[ "$NETWORK_MODE" == "routed" ]] && ! systemctl is-active --quiet enra-dnsmasq.service; then
+        systemctl start enra-dnsmasq.service || warn "ENRA DHCP/DNS could not start. Inspect 'enra logs'."
+    fi
+    if ! systemctl is-active --quiet enra-hotplug-scan.service; then
+        systemctl start enra-hotplug-scan.service || warn "ENRA NIC integration scan could not start."
+    fi
+
+    if [[ -n "$UPLINK_IF" && ! -r "/sys/class/net/$UPLINK_IF/carrier" ]]; then
+        warn "Upstream interface $UPLINK_IF has no readable carrier state."
+    elif [[ -n "$UPLINK_IF" && "$(cat "/sys/class/net/$UPLINK_IF/carrier" 2>/dev/null || echo 0)" != "1" ]]; then
+        warn "Upstream Ethernet link is down. ENRA remains available locally and will use the uplink when carrier returns."
+    fi
+)
+
+monitor_links() {
+    require_root monitor-links
+    require_systemd
+    command -v ip >/dev/null 2>&1 || die "iproute2 is required for link monitoring."
+    log "Monitoring Linux link events for adapter hotplug and Ethernet carrier changes."
+    while true; do
+        ip monitor link 2>/dev/null | while IFS= read -r event; do
+            [[ -n "$event" ]] || continue
+            sleep 1
+            "$INSTALLED_SCRIPT" reconcile || warn "ENRA reconciliation failed after a network link event."
+        done
+        warn "The kernel link-event monitor stopped. Reconnecting in two seconds."
+        sleep 2
+    done
+}
+
 
 check_missing_segments() {
     [[ "$NETWORK_MODE" == "routed" ]] || return 0
@@ -1511,10 +1585,21 @@ status() {
 
     printf '\nConfigured interface availability:\n'
     for iface in "$WIFI_IF" "$UPLINK_IF"; do
-        if ip link show dev "$iface" >/dev/null 2>&1; then
-            printf '  [PRESENT] %s\n' "$iface"
+        if [[ -z "$iface" ]] || ! ip link show dev "$iface" >/dev/null 2>&1; then
+            printf '  [MISSING] %s\n' "${iface:-unset}"
+            continue
+        fi
+        local operstate carrier
+        operstate="$(cat "/sys/class/net/$iface/operstate" 2>/dev/null || printf 'unknown')"
+        carrier="$(cat "/sys/class/net/$iface/carrier" 2>/dev/null || printf 'unknown')"
+        if [[ "$iface" == "$WIFI_IF" ]]; then
+            printf '  [PRESENT] %s (wireless, state: %s)\n' "$iface" "$operstate"
+        elif [[ "$carrier" == "1" ]]; then
+            printf '  [PRESENT] %s (Ethernet carrier: connected, state: %s)\n' "$iface" "$operstate"
+        elif [[ "$carrier" == "0" ]]; then
+            printf '  [PRESENT] %s (Ethernet carrier: disconnected; cable unplugged)\n' "$iface"
         else
-            printf '  [MISSING] %s\n' "$iface"
+            printf '  [PRESENT] %s (Ethernet carrier: %s, state: %s)\n' "$iface" "$carrier" "$operstate"
         fi
     done
     printf '\nNetwork addresses:\n'; ip -br addr || true
@@ -1610,8 +1695,13 @@ validate() {
 
     if [[ -n "$UPLINK_IF" ]] && ip link show dev "$UPLINK_IF" >/dev/null 2>&1; then
         validate_check pass "Upstream interface exists: $UPLINK_IF."
+        if [[ -r "/sys/class/net/$UPLINK_IF/carrier" && "$(cat "/sys/class/net/$UPLINK_IF/carrier" 2>/dev/null || echo 0)" != "1" ]]; then
+            validate_check warn "Upstream Ethernet cable is disconnected; local ENRA services can remain active."
+        fi
+    elif [[ "$NETWORK_MODE" == "routed" ]]; then
+        validate_check warn "Upstream interface is currently absent: ${UPLINK_IF:-unset}. Routed clients will have no upstream access until it returns."
     else
-        validate_check fail "Upstream interface is missing: ${UPLINK_IF:-unset}."
+        validate_check fail "Bridge uplink interface is missing: ${UPLINK_IF:-unset}."
     fi
 
     [[ -s "$HOSTAPD_FILE" ]] &&
@@ -1738,7 +1828,7 @@ validate() {
     printf 'Run "enra logs" for ENRA service logs.\n'
     return 1
 }
-logs() { journalctl -u enra-devices.service -u enra-hotplug-scan.service -u enra-network.service -u enra-ap.service -u enra-dnsmasq.service -n 120 --no-pager; }
+logs() { journalctl -u enra-link-monitor.service -u enra-devices.service -u enra-hotplug-scan.service -u enra-network.service -u enra-ap.service -u enra-dnsmasq.service -n 120 --no-pager; }
 start() {
     require_root start
     require_systemd
@@ -2064,6 +2154,8 @@ case "$ACTION" in
     setup) setup ;;
     status) status ;;
     preflight) preflight ;;
+    reconcile) reconcile ;;
+    monitor-links) monitor_links ;;
     validate|/validate) validate ;;
     config|/config) config "${@:2}" ;;
     update) update ;;
