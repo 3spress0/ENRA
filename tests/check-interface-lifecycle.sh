@@ -30,6 +30,9 @@ require_rule "A missing bridge uplink does not tear down the local AP" 'Keeping 
 require_rule "Ethernet carrier loss is reported without stopping routed Wi-Fi" 'Upstream Ethernet link is down. ENRA remains available locally and will use the uplink when carrier returns.'
 require_rule "AP and DHCP services are wanted, not hard-required by network service" 'Wants=enra-network.service'
 require_rule "Link monitor is installed as an ENRA systemd unit" 'Description=ENRA monitor for network adapter and carrier changes'
+require_rule "Saved Wi-Fi driver module is loaded during adapter discovery" 'modprobe "$DRIVER_MODULE" >/dev/null 2>&1'
+require_rule "Bridge uplink is reattached after an adapter returns" 'Bridge uplink $UPLINK_IF is not attached to $BRIDGE_IF; scheduling bridge recovery.'
+require_rule "Routed segment MAC migration is persisted for legacy configs" 'Migrated routed segment adapter identities into the ENRA configuration.'
 require_rule "Manual stop clears the runtime recovery marker" 'rm -f /run/enra/wifi-ready'
 
 printf 'ENRA interface lifecycle contract checks passed.\n'
