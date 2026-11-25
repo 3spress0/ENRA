@@ -1365,7 +1365,7 @@ validate_check() {
 
 validate_service() {
     local label="$1" unit="$2" active enabled
-    if [[ "${ENRA_RUNTIME_READY:-yes}" != "yes" ]]; then
+    if [[ "${ENRA_RUNTIME_READY:-yes}" != "yes" && "$unit" != "enra-devices.service" ]]; then
         validate_check warn "$label service state is not evaluated until required interfaces return."
         return
     fi
@@ -1477,7 +1477,9 @@ validate() {
         for ((i = 0; i < segment_count; i++)); do
             if ip link show dev "${SEGMENT_IFACES[$i]}" >/dev/null 2>&1; then
                 validate_check pass "Segment ${SEGMENT_NAMES[$i]} interface exists: ${SEGMENT_IFACES[$i]}."
-                if ip -4 -o address show dev "${SEGMENT_IFACES[$i]}" 2>/dev/null |
+                if [[ "$ENRA_RUNTIME_READY" != "yes" ]]; then
+                    validate_check warn "Segment ${SEGMENT_NAMES[$i]} gateway assignment is not evaluated until required interfaces return."
+                elif ip -4 -o address show dev "${SEGMENT_IFACES[$i]}" 2>/dev/null |
                     awk '{print $4}' | grep -Fxq "${SEGMENT_GATEWAYS[$i]}/${SEGMENT_PREFIXES[$i]}"; then
                     validate_check pass "Segment ${SEGMENT_NAMES[$i]} gateway ${SEGMENT_GATEWAYS[$i]}/${SEGMENT_PREFIXES[$i]} is assigned."
                 else
@@ -1540,9 +1542,13 @@ validate() {
             validate_check warn "No default route currently uses $UPLINK_IF; routed clients may not have internet access."
         fi
     elif [[ "$NETWORK_MODE" == "bridge" ]]; then
-        ip link show dev "$BRIDGE_IF" >/dev/null 2>&1 &&
-            validate_check pass "ENRA bridge exists: $BRIDGE_IF." ||
+        if [[ "$ENRA_RUNTIME_READY" != "yes" ]]; then
+            validate_check warn "Bridge state is not evaluated until required interfaces return."
+        elif ip link show dev "$BRIDGE_IF" >/dev/null 2>&1; then
+            validate_check pass "ENRA bridge exists: $BRIDGE_IF."
+        else
             validate_check fail "ENRA bridge is missing: $BRIDGE_IF."
+        fi
     fi
 
     printf '\nENRA-managed services:\n'
