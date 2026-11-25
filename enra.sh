@@ -816,43 +816,51 @@ configure_interfaces() {
 
 
 configure_radio() {
-    local answer default_channel
-    read -r -p "Regulatory country code (ISO alpha-2) [NL]: " COUNTRY_CODE
-    COUNTRY_CODE="${COUNTRY_CODE:-NL}"
+    local answer default_channel detected_country
+    detected_country="$(iw reg get 2>/dev/null | awk '$1 == "country" {gsub(":", "", $2); print $2; exit}')"
+    [[ "$detected_country" =~ ^[A-Z]{2}$ && "$detected_country" != "00" ]] || detected_country="NL"
+    read -r -p "Country/region code (two letters, for example NL) [$detected_country]: " COUNTRY_CODE
+    COUNTRY_CODE="${COUNTRY_CODE:-$detected_country}"
     COUNTRY_CODE="${COUNTRY_CODE^^}"
-    [[ "$COUNTRY_CODE" =~ ^[A-Z]{2}$ ]] || die "Country code must contain two letters."
-    printf '\nRadio band:\n  1) 2.4 GHz\n  2) 5 GHz\n'
-    read -r -p "Select band [1]: " answer
+    [[ "$COUNTRY_CODE" =~ ^[A-Z]{2}$ ]] || die "Country/region code must contain two letters."
+
+    printf '\nWi-Fi frequency:\n'
+    printf '  1) 2.4 GHz - longer range and widest device compatibility\n'
+    printf '  2) 5 GHz   - often faster, but shorter range and not supported by every adapter\n'
+    read -r -p "Select frequency [1]: " answer
     case "$answer" in
         ""|1) BAND="2.4"; default_channel=6 ;;
         2) BAND="5"; default_channel=36 ;;
-        *) die "ENRA currently configures 2.4 GHz and 5 GHz APs." ;;
+        *) die "Select 1 for 2.4 GHz or 2 for 5 GHz." ;;
     esac
-    read -r -p "Channel [$default_channel]: " CHANNEL
+    read -r -p "Wi-Fi channel [$default_channel]: " CHANNEL
     CHANNEL="${CHANNEL:-$default_channel}"
     [[ "$CHANNEL" =~ ^[0-9]{1,3}$ ]] || die "Channel must be numeric."
 }
 
+
 configure_security() {
     local answer
-    printf '\nWireless security:\n'
-    printf '  1) WPA3-Personal (SAE, PMF required)\n'
-    printf '  2) WPA2-Personal (PSK, AES/CCMP)\n'
-    printf '  3) WPA2/WPA3 transition mode\n'
-    read -r -p "Select security [1]: " answer
+    printf '\nWi-Fi security:\n'
+    printf '  1) WPA3 - strongest option; all connecting devices must support WPA3\n'
+    printf '  2) WPA2 - works with older devices\n'
+    printf '  3) WPA2/WPA3 mixed - recommended when you are unsure about device compatibility\n'
+    read -r -p "Select security [3]: " answer
     case "$answer" in
-        ""|1) SECURITY="wpa3" ;;
+        1) SECURITY="wpa3" ;;
         2) SECURITY="wpa2" ;;
-        3) SECURITY="transition" ;;
-        *) die "Invalid security mode." ;;
+        ""|3) SECURITY="transition" ;;
+        *) die "Select 1, 2 or 3 for Wi-Fi security." ;;
     esac
     while true; do
-        read -r -s -p "Wi-Fi passphrase (8-63 printable ASCII characters): " PASSPHRASE
+        read -r -s -p "Choose a Wi-Fi password (8-63 printable characters): " PASSPHRASE
         printf '\n'
         [[ "$PASSPHRASE" =~ ^[[:print:]]{8,63}$ ]] && break
-        warn "Passphrase must contain 8-63 printable ASCII characters."
+        warn "The Wi-Fi password must contain 8-63 printable characters."
     done
+    printf 'Keep this password somewhere safe. It is stored in the root-only ENRA configuration and will not be shown again.\n' >&2
 }
+
 
 
 write_config_array() {
@@ -900,17 +908,20 @@ save_main_config() {
 
 write_configuration() {
     local ssid_bytes
-    read -r -p "Wi-Fi network name [espers cool network]: " SSID
-    SSID="${SSID:-espers cool network}"
+    printf '\nChoose the Wi-Fi name that will appear on phones, laptops and other devices.\n' >&2
+    read -r -p "Wi-Fi network name [ENRA Wi-Fi]: " SSID
+    SSID="${SSID:-ENRA Wi-Fi}"
     ssid_bytes="$(LC_ALL=C printf '%s' "$SSID" | wc -c)"
-    [[ "$ssid_bytes" -ge 1 && "$ssid_bytes" -le 32 ]] || die "SSID must contain 1-32 bytes."
-    [[ "$SSID" =~ ^[[:print:]]+$ ]] || die "SSID must contain printable ASCII characters."
+    [[ "$ssid_bytes" -ge 1 && "$ssid_bytes" -le 32 ]] || die "Wi-Fi name must contain 1-32 bytes."
+    [[ "$SSID" =~ ^[[:print:]]+$ ]] || die "Wi-Fi name must contain printable ASCII characters."
     SSID_HEX="$(printf '%s' "$SSID" | od -An -tx1 | tr -d ' \n')"
     save_main_config
     write_hostapd_config
     [[ "$NETWORK_MODE" != "routed" ]] || write_dnsmasq_config
     unset PASSPHRASE
 }
+
+
 write_hostapd_config() {
     local radio security
     if [[ "$BAND" == "2.4" ]]; then
