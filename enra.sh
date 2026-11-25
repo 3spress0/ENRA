@@ -993,13 +993,13 @@ setup() {
     install_services
     # Only ENRA-owned units are managed here. Debian may intentionally mask
     # the vendor hostapd.service; ENRA runs hostapd directly via enra-ap.service.
-    systemctl unmask enra-devices.service enra-network.service enra-ap.service enra-hotplug-scan.service
+    systemctl unmask enra-devices.service enra-network.service enra-ap.service enra-hotplug-scan.service enra-link-monitor.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         systemctl unmask enra-dnsmasq.service
     fi
     systemctl daemon-reload
     log "Enabling ENRA services..."
-    systemctl enable enra-devices.service enra-network.service enra-ap.service enra-hotplug-scan.service
+    systemctl enable enra-devices.service enra-network.service enra-ap.service enra-hotplug-scan.service enra-link-monitor.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         systemctl enable enra-dnsmasq.service
     else
@@ -1007,6 +1007,7 @@ setup() {
     fi
     log "Bringing detected network interfaces up..."
     systemctl restart enra-devices.service || die "Could not bring network interfaces up. Check journalctl -u enra-devices.service."
+    systemctl enable --now enra-link-monitor.service || die "Could not start ENRA link monitor."
     log "Starting ENRA network service..."
     systemctl restart enra-network.service || die "Network setup failed. Check journalctl -u enra-network.service."
     log "Starting ENRA access point service..."
@@ -1576,6 +1577,7 @@ status() {
 
     printf 'ENRA-managed services (active state and boot setting):\n'
     service_report "Device bring-up" enra-devices.service
+    service_report "Link monitor" enra-link-monitor.service
     service_report "NIC integration scan" enra-hotplug-scan.service
     service_report "Network" enra-network.service
     service_report "Access point (hostapd)" enra-ap.service
@@ -1837,17 +1839,12 @@ start() {
     systemctl daemon-reload
     udevadm control --reload-rules 2>/dev/null || true
     systemctl start enra-devices.service
-    if ! configured_interfaces_ready; then
-        warn "ENRA startup is deferred. Connect the configured Wi-Fi adapter and upstream NIC; ENRA will retry when either device appears."
-        return 0
-    fi
-    systemctl start enra-network.service enra-ap.service
-    [[ "$NETWORK_MODE" != "routed" ]] || systemctl start enra-dnsmasq.service
-    systemctl start enra-hotplug-scan.service
+    systemctl enable --now enra-link-monitor.service
+    reconcile
 }
 stop() {
     require_root stop
-    systemctl stop 'enra-hotplug@*.service' enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
+    systemctl stop enra-link-monitor.service 'enra-hotplug@*.service' enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
 }
 remove_segment() {
     require_root remove-segment
@@ -1955,7 +1952,7 @@ remove_segment() {
 disable_services() {
     local -a units=()
     local unit
-    for unit in enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service enra-devices.service; do
+    for unit in enra-link-monitor.service enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service enra-devices.service; do
         if systemctl cat "$unit" >/dev/null 2>&1; then
             units+=("$unit")
         fi
@@ -2001,7 +1998,8 @@ uninstall() {
         /etc/systemd/system/enra-hotplug-scan.service \
         /etc/systemd/system/enra-network.service \
         /etc/systemd/system/enra-ap.service \
-        /etc/systemd/system/enra-dnsmasq.service
+        /etc/systemd/system/enra-dnsmasq.service \
+        /etc/systemd/system/enra-link-monitor.service
     rm -f /etc/NetworkManager/conf.d/90-enra-unmanaged.conf
     rm -f /etc/systemd/network/00-enra-*.network
     rm -rf "$CONFIG_DIR" /run/enra
@@ -2073,22 +2071,23 @@ refresh() {
     fi
 
     install_services
-    systemctl unmask enra-devices.service enra-network.service enra-ap.service enra-hotplug-scan.service
+    systemctl unmask enra-devices.service enra-network.service enra-ap.service enra-hotplug-scan.service enra-link-monitor.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         systemctl unmask enra-dnsmasq.service
     fi
     systemctl daemon-reload
-    systemctl enable enra-devices.service enra-network.service enra-ap.service enra-hotplug-scan.service
+    systemctl enable enra-devices.service enra-network.service enra-ap.service enra-hotplug-scan.service enra-link-monitor.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         systemctl enable enra-dnsmasq.service
     else
         systemctl disable enra-dnsmasq.service >/dev/null 2>&1 || true
     fi
     systemctl restart enra-devices.service
+    systemctl start enra-link-monitor.service
     if ! configured_interfaces_ready; then
         systemctl stop enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
-        warn "ENRA files and systemd units were updated, but networking was not started because a configured Wi-Fi or upstream interface is missing."
-        warn "Connect the missing hardware or restore VM USB/network passthrough. ENRA will retry when the interface appears."
+        warn "ENRA files and systemd units were updated, but networking is waiting for the required Wi-Fi adapter (and a bridge uplink in bridge mode)."
+        warn "Connect the adapter or restore VM USB/network passthrough. The link monitor will start ENRA automatically when it appears."
         return 0
     fi
     systemctl restart enra-network.service
@@ -2114,6 +2113,7 @@ Usage:
   sudo enra status      Show configuration and service health
   sudo enra /validate   Check configuration, interfaces, firewall and services
   sudo enra preflight   Check whether required interfaces are available
+  sudo enra reconcile   Reconcile ENRA services with currently connected hardware
   sudo enra /config     Edit the main ENRA configuration
   sudo enra /config show  Print the main ENRA configuration
   sudo enra update      Download and install the latest GitHub version
@@ -2126,6 +2126,9 @@ Usage:
   sudo enra logs        Show ENRA service logs
 
 Automatic interfaces:
+  ENRA monitors adapter hotplug and Ethernet carrier changes automatically.
+  WIFI_MAC and UPLINK_MAC identify adapters across interface renames.
+  Set AUTO_DISCOVER_WIFI=false to require the originally selected Wi-Fi adapter.
   ENRA brings up detected hardware-backed network interfaces at boot.
   Set AUTO_UP_INTERFACES=false in /etc/enra/enra.conf to disable link bring-up.
   Set AUTO_ADD_INTERFACES=false to disable automatic routed NIC integration.
