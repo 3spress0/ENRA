@@ -547,19 +547,64 @@ choose_network_mode() {
 
 
 choose_interface() {
-    local prompt="$1" protect_default="$2" selected
-    printf '\nAvailable interfaces:\n' >&2
-    ip -br link >&2
-    read -r -p "$prompt: " selected
-    [[ -n "$selected" ]] || die "No interface selected."
-    ip link show dev "$selected" >/dev/null 2>&1 || die "Interface does not exist: $selected"
-    if [[ "$protect_default" == "yes" ]] &&
-       { ip route show default | grep -Eq "(^|[[:space:]])dev[[:space:]]+$selected([[:space:]]|$)" ||
-         ip -6 route show default | grep -Eq "(^|[[:space:]])dev[[:space:]]+$selected([[:space:]]|$)"; }; then
-        die "$selected carries a default route. Choose a dedicated LAN/backhaul interface."
+    local prompt="$1" protect_default="$2" iface path kind link ipv4 route selected
+    local default_index=1 selection i found=no
+    local -a choices=()
+
+    printf '\n%s\n' "$prompt" >&2
+    printf 'Select an adapter number. The current internet adapter is marked and protected when appropriate.\n' >&2
+    printf '  %-3s %-16s %-14s %-18s %-18s %s\n' "#" "Adapter" "Type" "Link" "IPv4 address" "Role" >&2
+
+    for path in /sys/class/net/*; do
+        [[ -d "$path" ]] || continue
+        iface="${path##*/}"
+        [[ "$iface" != "lo" && "$iface" != "$WIFI_IF" && "$iface" != "$BRIDGE_IF" ]] || continue
+        kind="$(interface_type_label "$iface")"
+        link="$(interface_link_label "$iface")"
+        ipv4="$(interface_ipv4_label "$iface")"
+        route=" "
+        if is_default_route_interface "$iface"; then
+            route="Internet"
+            if [[ "$protect_default" == "yes" ]]; then
+                printf '  %-3s %-16s %-14s %-18s %-18s %s\n' "-" "$iface" "$kind" "$link" "$ipv4" "In use; not selectable" >&2
+                continue
+            fi
+        fi
+        choices+=("$iface")
+        i="${#choices[@]}"
+        printf '  %-3s %-16s %-14s %-18s %-18s %s\n' "$i" "$iface" "$kind" "$link" "$ipv4" "$route" >&2
+        if [[ "$protect_default" != "yes" && "$route" == "Internet" ]]; then
+            default_index="$i"
+        fi
+    done
+
+    (("${#choices[@]}" > 0)) || {
+        if [[ "$protect_default" == "yes" ]]; then
+            die "No unused network adapter is available. Connect a separate Ethernet cable/adapter for ENRA. Your current internet adapter was intentionally protected."
+        fi
+        die "No suitable network adapter was detected. Connect the adapter and try again."
+    }
+
+    read -r -p "Select an adapter by number [$default_index]: " selected
+    selected="${selected:-$default_index}"
+    if [[ "$selected" =~ ^[0-9]+$ ]] && ((selected >= 1 && selected <= ${#choices[@]})); then
+        selected="${choices[$((selected - 1))]}"
+    else
+        for iface in "${choices[@]}"; do
+            if [[ "$selected" == "$iface" ]]; then
+                found=yes
+                break
+            fi
+        done
+        [[ "$found" == "yes" ]] || die "That selection does not match a listed adapter."
+    fi
+    ip link show dev "$selected" >/dev/null 2>&1 || die "The selected adapter is no longer available: $selected"
+    if [[ "$protect_default" == "yes" ]] && is_default_route_interface "$selected"; then
+        die "$selected is carrying the computer's internet/default route. Choose a separate adapter connected to the LAN instead."
     fi
     printf '%s' "$selected"
 }
+
 
 validate_bridge_port() {
     local iface="$1"
