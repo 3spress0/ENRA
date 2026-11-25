@@ -38,8 +38,8 @@ require_rule "Removed segments are excluded from automatic discovery" 'AUTO_UP_E
 require_rule "Validator inspects the active forwarding chain" 'nft list chain inet enra forward'
 require_rule "Hotplug does not restart a stopped network service" 'if ! systemctl is-active --quiet enra-network.service; then'
 require_rule "Network services preflight configured interfaces before startup" 'ExecCondition=/usr/local/sbin/enra preflight'
-require_rule "Missing interfaces defer service startup instead of cascading failures" 'networking was not started because a configured Wi-Fi or upstream interface is missing.'
-require_rule "Hotplugged Wi-Fi or upstream interfaces trigger recovery" 'recover_required_interface "$iface"'
+require_rule "Missing interfaces defer service startup before dependent units run" 'ExecCondition=/usr/local/sbin/enra preflight'
+require_rule "Adapter hotplug and cable carrier events are observed through netlink" 'ip monitor link'
 require_rule "Validation skips dependent firewall checks while core interfaces are missing" 'Forwarding and firewall checks skipped because a required interface is missing.'
 
 hotplug_unit="$(sed -n '/Description=ENRA automatic network segment/,/\[Service\]/p' "$ENRA_SCRIPT")"
