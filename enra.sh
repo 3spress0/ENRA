@@ -530,16 +530,21 @@ choose_wireless_interface() {
 
 choose_network_mode() {
     local answer
-    printf '\nNetwork mode:\n'
-    printf '  1) bridge - join an existing LAN; its router provides DHCP/routing\n'
-    printf '  2) routed - create a separate IPv4 subnet with DHCP and NAT\n'
-    read -r -p "Select mode [1]: " answer
+    printf '\nHow should devices connected to ENRA reach your network?\n'
+    printf '  1) Join my existing network (Bridge)\n'
+    printf '     Your current router/firewall continues to provide IP addresses and internet access.\n'
+    printf '     Choose this when ENRA should act like an additional Wi-Fi access point.\n'
+    printf '  2) Create a separate network (Routed)\n'
+    printf '     ENRA provides IP addresses, routing and isolation for connected devices.\n'
+    printf '     Choose this when ENRA should create its own network behind your router.\n'
+    read -r -p "Select a mode [1]: " answer
     case "$answer" in
         ""|1|bridge) NETWORK_MODE="bridge" ;;
         2|routed) NETWORK_MODE="routed" ;;
-        *) die "Invalid network mode." ;;
+        *) die "Enter 1 to join your existing network, or 2 to create a separate network." ;;
     esac
 }
+
 
 choose_interface() {
     local prompt="$1" protect_default="$2" selected
