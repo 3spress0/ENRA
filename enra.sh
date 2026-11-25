@@ -178,9 +178,9 @@ interface_mac() {
 replace_interface_directive() {
     local file="$1" old_iface="$2" new_iface="$3" directive="$4" temp mode
     [[ -f "$file" && -n "$old_iface" && "$old_iface" != "$new_iface" ]] || return 0
-    temp="$(mktemp "\${file}.XXXXXX")"
+    temp="$(mktemp "${file}.XXXXXX")"
     mode="$(stat -c '%a' "$file" 2>/dev/null || printf '600')"
-    awk -v prefix="\${directive}=" -v old="$old_iface" -v new="$new_iface" '
+    awk -v prefix="${directive}=" -v old="$old_iface" -v new="$new_iface" '
         $0 == prefix old { print prefix new; next }
         { print }
     ' "$file" > "$temp" || {
@@ -205,7 +205,8 @@ resolve_wireless_interface() {
 
     if [[ -n "$WIFI_IF" ]] && iw dev "$WIFI_IF" info >/dev/null 2>&1 && supports_ap_mode "$WIFI_IF"; then
         mac="$(interface_mac "$WIFI_IF" 2>/dev/null || true)"
-        if [[ -n "$mac" && "$mac" != "\${WIFI_MAC:-}" ]]; then
+        if [[ -n "$mac" && "$mac" != "${WIFI_MAC:-}" ]]; then
+            [[ -z "${WIFI_MAC:-}" ]] || ENRA_INTERFACE_REBOUND=yes
             WIFI_MAC="$mac"
             save_main_config
             log "Saved Wi-Fi adapter identity: $WIFI_IF ($WIFI_MAC)."
@@ -213,7 +214,7 @@ resolve_wireless_interface() {
         return 0
     fi
 
-    if [[ -n "\${WIFI_MAC:-}" ]]; then
+    if [[ -n "${WIFI_MAC:-}" ]]; then
         while IFS= read -r iface; do
             [[ -n "$iface" ]] || continue
             supports_ap_mode "$iface" || continue
@@ -226,7 +227,7 @@ resolve_wireless_interface() {
     fi
 
     if [[ -z "$candidate" ]]; then
-        case "\${AUTO_DISCOVER_WIFI,,}" in
+        case "${AUTO_DISCOVER_WIFI,,}" in
             true|yes|1|on)
                 candidates="$(wireless_ap_interfaces)"
                 count="$(grep -c . <<< "$candidates" || true)"
@@ -251,7 +252,8 @@ resolve_wireless_interface() {
 
     WIFI_IF="$candidate"
     WIFI_MAC="$(interface_mac "$candidate" 2>/dev/null || true)"
-    if [[ "$NETWORK_MODE" == "routed" && "\${SEGMENT_IFACES[0]:-}" == "$old_iface" ]]; then
+    ENRA_INTERFACE_REBOUND=yes
+    if [[ "$NETWORK_MODE" == "routed" && "${SEGMENT_IFACES[0]:-}" == "$old_iface" ]]; then
         SEGMENT_IFACES[0]="$candidate"
     fi
 
@@ -271,7 +273,8 @@ resolve_uplink_interface() {
     local old_iface="$UPLINK_IF" iface candidate="" mac iface_path
     if [[ -n "$UPLINK_IF" ]] && ip link show dev "$UPLINK_IF" >/dev/null 2>&1; then
         mac="$(interface_mac "$UPLINK_IF" 2>/dev/null || true)"
-        if [[ -n "$mac" && "$mac" != "\${UPLINK_MAC:-}" ]]; then
+        if [[ -n "$mac" && "$mac" != "${UPLINK_MAC:-}" ]]; then
+            [[ -z "${UPLINK_MAC:-}" ]] || ENRA_INTERFACE_REBOUND=yes
             UPLINK_MAC="$mac"
             save_main_config
             log "Saved upstream adapter identity: $UPLINK_IF ($UPLINK_MAC)."
@@ -279,14 +282,14 @@ resolve_uplink_interface() {
         return 0
     fi
 
-    [[ -n "\${UPLINK_MAC:-}" ]] || {
+    [[ -n "${UPLINK_MAC:-}" ]] || {
         warn "Configured upstream interface $UPLINK_IF is missing and has no saved MAC identity. Run 'enra setup' to select its replacement."
         return 1
     }
 
     for iface_path in /sys/class/net/*; do
         [[ -d "$iface_path" ]] || continue
-        iface="\${iface_path##*/}"
+        iface="${iface_path##*/}"
         [[ "$iface" != "lo" ]] || continue
         [[ "$(cat "$iface_path/type" 2>/dev/null || echo 0)" == "1" ]] || continue
         [[ -d "$iface_path/device" ]] || continue
@@ -304,6 +307,7 @@ resolve_uplink_interface() {
     fi
 
     UPLINK_IF="$candidate"
+    ENRA_INTERFACE_REBOUND=yes
     [[ -z "$old_iface" ]] || rm -f "/etc/systemd/network/00-enra-$old_iface.network"
     save_main_config
     configure_network_manager
@@ -1184,8 +1188,12 @@ hotplug_add() (
     flock -w 60 9 || die "Timed out waiting for another ENRA interface update."
 
     load_config
+    if ! systemctl is-active --quiet enra-link-monitor.service; then
+        log "ENRA is stopped; ignoring automatic interface event."
+        return 0
+    fi
     if [[ "$iface" == "$WIFI_IF" || "$iface" == "$UPLINK_IF" ]]; then
-        recover_required_interface "$iface"
+        log "Core interface event received for $iface; the link monitor will reconcile service state."
         return 0
     fi
     if ! systemctl is-active --quiet enra-network.service; then
@@ -1354,10 +1362,19 @@ reconcile() (
     flock -n 8 || return 0
 
     load_config
+    ENRA_INTERFACE_REBOUND=no
     if ! configured_interfaces_ready; then
+        rm -f /run/enra/wifi-ready
         warn "ENRA is degraded: required wireless hardware is unavailable (or the bridge uplink is missing). Stopping only dependent ENRA services."
         systemctl stop enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
         return 0
+    fi
+
+    local restart_stack=no
+    if [[ ! -f /run/enra/wifi-ready || "$ENRA_INTERFACE_REBOUND" == "yes" ]]; then
+        restart_stack=yes
+        install -d -m 0700 /run/enra
+        touch /run/enra/wifi-ready
     fi
 
     systemctl start enra-devices.service || warn "Could not start ENRA device bring-up service."
@@ -1367,20 +1384,34 @@ reconcile() (
     }
 
     systemctl reset-failed enra-network.service enra-ap.service enra-dnsmasq.service enra-hotplug-scan.service 2>/dev/null || true
-    if ! systemctl is-active --quiet enra-network.service; then
+    if [[ "$restart_stack" == "yes" ]] && systemctl is-active --quiet enra-network.service; then
+        systemctl restart enra-network.service || {
+            warn "ENRA network configuration could not restart after an adapter change. Inspect 'enra logs'."
+            return 0
+        }
+    elif ! systemctl is-active --quiet enra-network.service; then
         systemctl start enra-network.service || {
             warn "ENRA network configuration could not start. Inspect 'enra logs'."
             return 0
         }
     fi
-    if ! systemctl is-active --quiet enra-ap.service; then
+    if [[ "$restart_stack" == "yes" ]] && systemctl is-active --quiet enra-ap.service; then
+        systemctl restart enra-ap.service || {
+            warn "ENRA access point could not restart after an adapter change. Inspect 'enra logs'."
+            return 0
+        }
+    elif ! systemctl is-active --quiet enra-ap.service; then
         systemctl start enra-ap.service || {
             warn "ENRA access point could not start. Inspect 'enra logs'."
             return 0
         }
     fi
-    if [[ "$NETWORK_MODE" == "routed" ]] && ! systemctl is-active --quiet enra-dnsmasq.service; then
-        systemctl start enra-dnsmasq.service || warn "ENRA DHCP/DNS could not start. Inspect 'enra logs'."
+    if [[ "$NETWORK_MODE" == "routed" ]]; then
+        if [[ "$restart_stack" == "yes" ]] && systemctl is-active --quiet enra-dnsmasq.service; then
+            systemctl restart enra-dnsmasq.service || warn "ENRA DHCP/DNS could not restart after an adapter change."
+        elif ! systemctl is-active --quiet enra-dnsmasq.service; then
+            systemctl start enra-dnsmasq.service || warn "ENRA DHCP/DNS could not start. Inspect 'enra logs'."
+        fi
     fi
     if ! systemctl is-active --quiet enra-hotplug-scan.service; then
         systemctl start enra-hotplug-scan.service || warn "ENRA NIC integration scan could not start."
@@ -1845,6 +1876,7 @@ start() {
 stop() {
     require_root stop
     systemctl stop enra-link-monitor.service 'enra-hotplug@*.service' enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
+    rm -f /run/enra/wifi-ready
 }
 remove_segment() {
     require_root remove-segment
