@@ -1053,12 +1053,12 @@ setup() {
     else
         systemctl disable enra-dnsmasq.service >/dev/null 2>&1 || true
     fi
-    log "Scanning for additional Ethernet interfaces..."
-    systemctl restart enra-hotplug-scan.service ||
-        warn "Automatic NIC scan failed. Inspect journalctl -u enra-hotplug-scan.service."
     mkdir -p /run/enra
     touch /run/enra/wifi-ready
     systemctl start enra-link-monitor.service || warn "ENRA link monitor could not start; manual service recovery will still work."
+    log "Scanning for additional Ethernet interfaces..."
+    systemctl restart enra-hotplug-scan.service ||
+        warn "Automatic NIC scan failed. Inspect journalctl -u enra-hotplug-scan.service."
     success "ENRA setup completed."
     printf 'Mode: %s\nWireless interface: %s\nSSID: %s\nBand/channel: %s GHz / %s\nSecurity: %s\n' \
         "$NETWORK_MODE" "$WIFI_IF" "$SSID" "$BAND" "$CHANNEL" "$SECURITY"
@@ -2186,8 +2186,9 @@ refresh() {
     fi
     systemctl restart enra-devices.service
     if ! configured_interfaces_ready; then
+        rm -f /run/enra/wifi-ready
         systemctl stop enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
-        warn "ENRA files and systemd units were updated, but networking is waiting for the required Wi-Fi adapter (and a bridge uplink in bridge mode)."
+        warn "ENRA files and systemd units were updated, but networking is waiting for the Wi-Fi adapter."
         warn "Connect the adapter or restore VM USB/network passthrough. The link monitor will start ENRA automatically when it appears."
         systemctl start enra-link-monitor.service
         return 0
@@ -2197,11 +2198,11 @@ refresh() {
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         systemctl restart enra-dnsmasq.service
     fi
-    systemctl restart enra-hotplug-scan.service ||
-        warn "Automatic NIC scan failed. Inspect journalctl -u enra-hotplug-scan.service."
     mkdir -p /run/enra
     touch /run/enra/wifi-ready
     systemctl start enra-link-monitor.service
+    systemctl restart enra-hotplug-scan.service ||
+        warn "Automatic NIC scan failed. Inspect journalctl -u enra-hotplug-scan.service."
     success "ENRA service definitions refreshed and services restarted."
 }
 update() {
