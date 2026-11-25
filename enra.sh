@@ -1935,7 +1935,7 @@ start() {
     systemctl daemon-reload
     udevadm control --reload-rules 2>/dev/null || true
     systemctl start enra-devices.service
-    systemctl enable --now enra-link-monitor.service
+    systemctl start enra-link-monitor.service
     reconcile
 }
 stop() {
