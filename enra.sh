@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly ENRA_VERSION="0.7.0"
+readonly ENRA_VERSION="0.8.0"
 readonly CONFIG_DIR="/etc/enra"
 readonly CONFIG_FILE="$CONFIG_DIR/enra.conf"
 readonly HOSTAPD_FILE="$CONFIG_DIR/hostapd.conf"
@@ -1231,6 +1231,13 @@ setup() {
     success "ENRA setup completed."
     printf 'Mode: %s\nWireless interface: %s\nSSID: %s\nBand/channel: %s GHz / %s\nSecurity: %s\n' \
         "$NETWORK_MODE" "$WIFI_IF" "$SSID" "$BAND" "$CHANNEL" "$SECURITY"
+    printf '\nConnect your devices to "%s" with the Wi-Fi password you entered during setup.\n' "$SSID"
+    if [[ "$NETWORK_MODE" == "bridge" ]]; then
+        printf 'Your existing router continues to provide IP addresses and network access.\n'
+    else
+        printf 'ENRA provides device addresses and routing for the Wi-Fi network (%s).\n' "$AP_NETWORK"
+    fi
+    printf 'Run "sudo enra status" to check ENRA, or "sudo enra logs" when something is not working.\n'
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         printf 'Routed segments: %s\n' "${#SEGMENT_IFACES[@]}"
         local i
