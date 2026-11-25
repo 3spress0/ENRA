@@ -330,9 +330,12 @@ resolve_configured_interfaces() {
     resolve_uplink_interface || uplink_ready=no
 
     [[ "$wifi_ready" == "yes" ]] || return 1
-    if [[ "$NETWORK_MODE" == "bridge" && "$uplink_ready" != "yes" ]]; then
-        warn "Bridge mode is waiting for its configured Ethernet interface."
-        return 1
+    if [[ "$uplink_ready" != "yes" ]]; then
+        if [[ "$NETWORK_MODE" == "bridge" ]]; then
+            warn "Bridge mode is degraded: Wi-Fi remains available, but its Ethernet uplink is disconnected."
+        else
+            warn "Routed mode is degraded: local Wi-Fi remains available, but the upstream interface is unavailable."
+        fi
     fi
     return 0
 }
@@ -569,6 +572,7 @@ configure_interfaces() {
     DNS_UPSTREAM="${DNS_UPSTREAM:-1.1.1.1}"
 
     SEGMENT_IFACES=("$WIFI_IF")
+    SEGMENT_MACS=("$WIFI_MAC")
     SEGMENT_NAMES=("Wi-Fi")
     SEGMENT_GATEWAYS=()
     SEGMENT_PREFIXES=()
@@ -621,6 +625,7 @@ configure_interfaces() {
             die "Invalid network settings for Ethernet segment $i."
 
         SEGMENT_IFACES+=("$selected")
+        SEGMENT_MACS+=("$(interface_mac "$selected" 2>/dev/null || true)")
         SEGMENT_NAMES+=("Ethernet $i")
         SEGMENT_GATEWAYS+=("$gateway")
         SEGMENT_PREFIXES+=("$prefix")
@@ -1522,17 +1527,20 @@ network_up() {
     check_missing_segments
     if [[ "$NETWORK_MODE" == "bridge" ]]; then
         ip link show dev "$WIFI_IF" >/dev/null 2>&1 || die "Wireless interface not found: $WIFI_IF"
-        ip link show dev "$UPLINK_IF" >/dev/null 2>&1 || die "Bridge uplink not found: $UPLINK_IF"
         ip link set dev "$WIFI_IF" up
         [[ -d "/sys/class/net/$BRIDGE_IF/bridge" ]] || ip link add name "$BRIDGE_IF" type bridge stp_state 0
-        if [[ -L "/sys/class/net/$UPLINK_IF/master" ]]; then
-            local master
-            master="$(basename "$(readlink -f "/sys/class/net/$UPLINK_IF/master")")"
-            [[ "$master" == "$BRIDGE_IF" ]] || die "$UPLINK_IF is already attached to $master."
+        if ip link show dev "$UPLINK_IF" >/dev/null 2>&1; then
+            if [[ -L "/sys/class/net/$UPLINK_IF/master" ]]; then
+                local master
+                master="$(basename "$(readlink -f "/sys/class/net/$UPLINK_IF/master")")"
+                [[ "$master" == "$BRIDGE_IF" ]] || die "$UPLINK_IF is already attached to $master."
+            else
+                ip link set dev "$UPLINK_IF" master "$BRIDGE_IF"
+            fi
+            ip link set dev "$UPLINK_IF" up
         else
-            ip link set dev "$UPLINK_IF" master "$BRIDGE_IF"
+            warn "Bridge Ethernet uplink $UPLINK_IF is absent. Keeping the Wi-Fi access point and bridge running without its wired backhaul."
         fi
-        ip link set dev "$UPLINK_IF" up
         ip link set dev "$BRIDGE_IF" up
         return 0
     fi
@@ -1895,7 +1903,7 @@ validate() {
         fi
     elif [[ "$NETWORK_MODE" == "bridge" ]]; then
         if [[ "$ENRA_RUNTIME_READY" != "yes" ]]; then
-            validate_check warn "Bridge state is not evaluated until required interfaces return."
+            validate_check warn "Bridge state is not evaluated until the Wi-Fi adapter returns."
         elif ip link show dev "$BRIDGE_IF" >/dev/null 2>&1; then
             validate_check pass "ENRA bridge exists: $BRIDGE_IF."
         else
