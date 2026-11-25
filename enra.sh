@@ -483,20 +483,50 @@ discover_driver() {
 }
 
 choose_wireless_interface() {
-    local choices
-    choices="$(wireless_list)"
-    [[ -n "$choices" ]] || die "No wireless interface was detected."
-    printf '\nDetected wireless interfaces:\n%s\n' "$choices"
-    if [[ "$(printf '%s\n' "$choices" | wc -l)" -eq 1 ]]; then
-        WIFI_IF="$(printf '%s\n' "$choices" | head -n 1)"
-    else
-        read -r -p "Enter the wireless interface to use: " WIFI_IF
-        grep -Fxq "$WIFI_IF" <<< "$choices" || die "That interface was not detected."
+    local iface selected="" default_index=1 selection i
+    local -a choices=()
+    mapfile -t choices < <(wireless_ap_interfaces)
+    if (("${#choices[@]}" == 0)); then
+        if [[ -n "$(wireless_list)" ]]; then
+            die "A Wi-Fi adapter was detected, but none of its drivers advertise access-point support. Check adapter/driver compatibility, then run 'sudo enra setup' again."
+        fi
+        die "No Wi-Fi adapter was detected. Connect a supported Wi-Fi adapter and run 'sudo enra setup' again."
     fi
-    supports_ap_mode "$WIFI_IF" || die "$WIFI_IF does not advertise AP mode. Use an adapter/driver with AP-mode support."
+    for i in "${!choices[@]}"; do
+        if [[ "${choices[$i]}" == "${WIFI_IF:-}" ]]; then
+            default_index=$((i + 1))
+            break
+        fi
+    done
+    if (("${#choices[@]}" == 1)); then
+        WIFI_IF="${choices[0]}"
+        success "Detected the Wi-Fi adapter: $WIFI_IF"
+    else
+        printf '\nWi-Fi adapters that support access-point mode:\n' >&2
+        printf '  %-3s %-16s %-16s %-12s\n' "#" "Adapter" "Connection" "IPv4 address" >&2
+        for i in "${!choices[@]}"; do
+            iface="${choices[$i]}"
+            printf '  %-3s %-16s %-16s %-12s\n' "$((i + 1))" "$iface" "$(interface_link_label "$iface")" "$(interface_ipv4_label "$iface")" >&2
+        done
+        read -r -p "Select the Wi-Fi adapter by number [$default_index]: " selection
+        selection="${selection:-$default_index}"
+        if [[ "$selection" =~ ^[0-9]+$ ]] && ((selection >= 1 && selection <= ${#choices[@]})); then
+            WIFI_IF="${choices[$((selection - 1))]}"
+        else
+            for iface in "${choices[@]}"; do
+                if [[ "$selection" == "$iface" ]]; then
+                    WIFI_IF="$iface"
+                    break
+                fi
+            done
+            [[ -n "$WIFI_IF" ]] || die "That selection does not match a listed Wi-Fi adapter."
+        fi
+    fi
+    supports_ap_mode "$WIFI_IF" || die "$WIFI_IF does not advertise access-point mode. Use a compatible Wi-Fi adapter/driver."
     WIFI_MAC="$(interface_mac "$WIFI_IF" 2>/dev/null || true)"
-    success "Access-point interface: $WIFI_IF (${WIFI_MAC:-MAC unavailable})"
+    success "Wi-Fi adapter selected: $WIFI_IF (${WIFI_MAC:-MAC unavailable})"
 }
+
 
 choose_network_mode() {
     local answer
