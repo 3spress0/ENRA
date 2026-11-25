@@ -1011,7 +1011,6 @@ setup() {
     fi
     log "Bringing detected network interfaces up..."
     systemctl restart enra-devices.service || die "Could not bring network interfaces up. Check journalctl -u enra-devices.service."
-    systemctl enable --now enra-link-monitor.service || die "Could not start ENRA link monitor."
     log "Starting ENRA network service..."
     systemctl restart enra-network.service || die "Network setup failed. Check journalctl -u enra-network.service."
     log "Starting ENRA access point service..."
@@ -1031,6 +1030,9 @@ setup() {
     log "Scanning for additional Ethernet interfaces..."
     systemctl restart enra-hotplug-scan.service ||
         warn "Automatic NIC scan failed. Inspect journalctl -u enra-hotplug-scan.service."
+    mkdir -p /run/enra
+    touch /run/enra/wifi-ready
+    systemctl start enra-link-monitor.service || warn "ENRA link monitor could not start; manual service recovery will still work."
     success "ENRA setup completed."
     printf 'Mode: %s\nWireless interface: %s\nSSID: %s\nBand/channel: %s GHz / %s\nSecurity: %s\n' \
         "$NETWORK_MODE" "$WIFI_IF" "$SSID" "$BAND" "$CHANNEL" "$SECURITY"
@@ -1637,7 +1639,7 @@ status() {
     done
     printf '\nNetwork addresses:\n'; ip -br addr || true
     printf '\nWireless interface state:\n'; iw dev || true
-    printf '\nENRA logs:\n'; journalctl -u enra-network.service -u enra-ap.service -u enra-dnsmasq.service -n 30 --no-pager || true
+    printf '\nENRA logs:\n'; journalctl -u enra-link-monitor.service -u enra-network.service -u enra-ap.service -u enra-dnsmasq.service -n 30 --no-pager || true
 
     printf '\nNote: ENRA uses its own enra-ap.service and (in routed mode) enra-dnsmasq.service.\n'
     printf 'The distribution units hostapd.service and dnsmasq.service are not used by ENRA.\n'
@@ -1652,7 +1654,7 @@ validate_check() {
 
 validate_service() {
     local label="$1" unit="$2" active enabled
-    if [[ "${ENRA_RUNTIME_READY:-yes}" != "yes" && "$unit" != "enra-devices.service" ]]; then
+    if [[ "${ENRA_RUNTIME_READY:-yes}" != "yes" && "$unit" != "enra-devices.service" && "$unit" != "enra-link-monitor.service" ]]; then
         validate_check warn "$label service state is not evaluated until required interfaces return."
         return
     fi
@@ -1845,6 +1847,7 @@ validate() {
 
     printf '\nENRA-managed services:\n'
     validate_service "Device bring-up" enra-devices.service
+    validate_service "Link monitor" enra-link-monitor.service
     validate_service "NIC integration scan" enra-hotplug-scan.service
     validate_service "Network" enra-network.service
     validate_service "Access point" enra-ap.service
@@ -2115,11 +2118,11 @@ refresh() {
         systemctl disable enra-dnsmasq.service >/dev/null 2>&1 || true
     fi
     systemctl restart enra-devices.service
-    systemctl start enra-link-monitor.service
     if ! configured_interfaces_ready; then
         systemctl stop enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
         warn "ENRA files and systemd units were updated, but networking is waiting for the required Wi-Fi adapter (and a bridge uplink in bridge mode)."
         warn "Connect the adapter or restore VM USB/network passthrough. The link monitor will start ENRA automatically when it appears."
+        systemctl start enra-link-monitor.service
         return 0
     fi
     systemctl restart enra-network.service
@@ -2129,6 +2132,9 @@ refresh() {
     fi
     systemctl restart enra-hotplug-scan.service ||
         warn "Automatic NIC scan failed. Inspect journalctl -u enra-hotplug-scan.service."
+    mkdir -p /run/enra
+    touch /run/enra/wifi-ready
+    systemctl start enra-link-monitor.service
     success "ENRA service definitions refreshed and services restarted."
 }
 update() {
