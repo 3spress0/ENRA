@@ -7,9 +7,9 @@ ENRA_SCRIPT="$ROOT_DIR/enra.sh"
 require_rule() {
     local description="$1" pattern="$2"
     if grep -Fq -- "$pattern" "$ENRA_SCRIPT"; then
-        printf '[PASS] %s\\n' "$description"
+        printf '[PASS] %s\n' "$description"
     else
-        printf '[FAIL] %s\\n' "$description" >&2
+        printf '[FAIL] %s\n' "$description" >&2
         exit 1
     fi
 }
@@ -32,4 +32,4 @@ require_rule "AP and DHCP services are wanted, not hard-required by network serv
 require_rule "Link monitor is installed as an ENRA systemd unit" 'Description=ENRA monitor for network adapter and carrier changes'
 require_rule "Manual stop clears the runtime recovery marker" 'rm -f /run/enra/wifi-ready'
 
-printf 'ENRA interface lifecycle contract checks passed.\\n'
+printf 'ENRA interface lifecycle contract checks passed.\n'
