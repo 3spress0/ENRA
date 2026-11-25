@@ -141,11 +141,11 @@ Automatic routed integration is intentionally disabled in bridge mode. Additiona
 - **WPA2-Personal:** PSK with AES/CCMP.
 - **Transition mode:** WPA2-PSK and WPA3-SAE together for older clients.
 
-WPA3 is the default. Linux alone does not guarantee WPA3 AP support. The adapter driver, firmware, hostapd build and clients must all support the selected mode. ENRA checks AP mode; service logs show hostapd errors.
+The first-run wizard defaults to WPA2/WPA3 transition mode so both newer and older clients can connect. Choose WPA3-only when every client supports it. Linux alone does not guarantee WPA3 AP support: the adapter driver, firmware, hostapd build and clients must support the selected mode. ENRA checks access-point mode; service logs show hostapd errors.
 
 ## Setup behavior
 
-Setup detects the package manager, installs hostapd and wireless tools, discovers wireless interfaces and verifies AP mode. Routed mode asks for one upstream interface, the Wi-Fi segment settings and a number of additional dedicated Ethernet segments. Each manually selected Ethernet segment is configured with its own interface, gateway, subnet and DHCP range. After the core services start, ENRA scans for other eligible Ethernet NICs. A udev rule also handles NICs connected later. ENRA marks selected downstream interfaces unmanaged in NetworkManager and systemd-networkd where those services are active. If ifupdown has an explicit stanza for a bridge port, setup stops rather than silently rewriting it. If no wireless interface is detected, setup prints a warning and exits without configuring services; connect the adapter/install its driver and rerun setup.
+Setup detects the package manager, installs hostapd and wireless tools, discovers wireless interfaces and verifies AP mode. Adapter selection uses numbered menus with connection state and IPv4 information instead of requiring users to remember interface names. Routed mode asks for one upstream interface, selects a non-conflicting Wi-Fi subnet and DHCP range automatically, and only asks for extra wired segments when the user opts in. Advanced users can still customize the gateway, subnet prefix and DHCP range during setup. A udev rule also handles NICs connected later. ENRA marks selected downstream interfaces unmanaged in NetworkManager and systemd-networkd where those services are active. If ifupdown has an explicit stanza for a bridge port, setup stops rather than silently rewriting it. If no wireless interface is detected, setup prints a warning and exits without configuring services; connect the adapter/install its driver and rerun setup.
 
 ### Existing Debian + RTL8821AU + OPNsense setup
 
@@ -171,7 +171,7 @@ The RTL8821AU maintainers recommend an in-kernel driver where available on moder
 
 ## Commands
 
-Install ENRA from a cloned repository with **sudo ./install.sh**. The installer places the command at **/usr/local/sbin/enra** and the updater at **/usr/local/sbin/enra-update**. You can then use ENRA from your PATH:
+When run from a cloned repository, **sudo ./install.sh** installs ENRA and starts the guided setup automatically. Use **sudo ./install.sh --install-only** to install without starting setup. The installer places the command at **/usr/local/sbin/enra** and the updater at **/usr/local/sbin/enra-update**. You can then use ENRA from your PATH:
 
 ~~~bash
 sudo enra setup
@@ -188,11 +188,10 @@ sudo enra remove-segment enp3s0
 sudo enra logs
 ~~~
 
-The installer can also be run directly from GitHub:
+The same one-command installer is available directly from GitHub:
 
 ~~~bash
 curl -fsSL https://raw.githubusercontent.com/3spress0/ENRA/main/install.sh | sudo bash
-sudo enra setup
 ~~~
 
 **Lifecycle commands:** `sudo enra stop` stops ENRA for the current session without changing boot startup. `sudo enra disable` stops services, disables boot startup and removes the hotplug udev rule while retaining configuration. `sudo enra start` starts ENRA for the current session and restores hotplug handling; `sudo enra enable` also enables boot startup. `sudo enra uninstall` asks for confirmation, then removes ENRA services, configuration and installed commands. A separately installed Wi-Fi DKMS driver is not removed.
