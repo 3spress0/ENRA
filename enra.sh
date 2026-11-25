@@ -212,6 +212,56 @@ wireless_ap_interfaces() {
     done < <(wireless_list)
 }
 
+
+interface_type_label() {
+    local iface="$1"
+    if iw dev "$iface" info >/dev/null 2>&1; then
+        printf 'Wi-Fi'
+    elif [[ -e "/sys/class/net/$iface/device" ]]; then
+        printf 'Wired'
+    else
+        printf 'Virtual/other'
+    fi
+}
+
+interface_link_label() {
+    local iface="$1" carrier state kind
+    kind="$(interface_type_label "$iface")"
+    state="$(cat "/sys/class/net/$iface/operstate" 2>/dev/null || printf 'unknown')"
+    if [[ -r "/sys/class/net/$iface/carrier" ]]; then
+        carrier="$(cat "/sys/class/net/$iface/carrier" 2>/dev/null || true)"
+        if [[ "$carrier" == "1" ]]; then
+            printf 'Connected'
+        elif [[ "$kind" == "Wired" ]]; then
+            printf 'Cable unplugged'
+        else
+            printf 'Not connected'
+        fi
+        return 0
+    fi
+    case "$state" in
+        up) printf 'Up' ;;
+        down) printf 'Down' ;;
+        dormant) printf 'Waiting' ;;
+        *) printf '%s' "$state" ;;
+    esac
+}
+
+interface_ipv4_label() {
+    local iface="$1" addresses
+    addresses="$(ip -o -4 address show dev "$iface" scope global 2>/dev/null | awk '{print $4}' | paste -sd ',' -)"
+    printf '%s' "${addresses:--}"
+}
+
+is_default_route_interface() {
+    local iface="$1"
+    if ip -4 route show default 2>/dev/null | awk -v wanted="$iface" '{for (i=1; i<NF; i++) if ($i == "dev" && $(i+1) == wanted) found=1} END {exit !found}'; then
+        return 0
+    fi
+    ip -6 route show default 2>/dev/null | awk -v wanted="$iface" '{for (i=1; i<NF; i++) if ($i == "dev" && $(i+1) == wanted) found=1} END {exit !found}'
+}
+
+
 resolve_wireless_interface() {
     local old_iface="$WIFI_IF" iface candidate="" mac candidates count=0
     if [[ -n "${DRIVER_MODULE:-}" ]]; then
