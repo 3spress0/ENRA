@@ -35,7 +35,7 @@ sudo enra status
 - Uses an existing kernel driver where available; it does not assume every adapter is Realtek.
 - Optional RTL8821AU DKMS installation when USB ID **0bda:0811** is detected and no wireless interface exists.
 - Graceful warning and exit when no wireless interface is available; base dependencies remain installed.
-- Missing configured Wi-Fi or upstream interfaces defer ENRA service startup without cascading systemd failures; validation reports the root cause and skips dependent firewall/service checks.
+- Missing Wi-Fi hardware defers only services that depend on the access point; missing Ethernet backhaul is treated as degraded connectivity rather than an application failure.
 - MAC-based adapter identity survives Linux interface renames and USB replugging for configured Wi-Fi, upstream and routed Ethernet adapters.
 - A persistent systemd link monitor reacts to adapter hotplug and Ethernet carrier transitions without polling.
 - An unplugged Ethernet cable does not stop the Wi-Fi access point. Bridge mode keeps its bridge/AP alive without a wired backhaul; routed mode keeps local Wi-Fi and DHCP running while upstream access is unavailable.
