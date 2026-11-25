@@ -51,6 +51,7 @@ require_systemd() {
 
 load_config() {
     [[ -f "$CONFIG_FILE" ]] || die "ENRA is not configured. Run: sudo enra setup"
+    local config_migrated=no
     # shellcheck source=/etc/enra/enra.conf
     source "$CONFIG_FILE"
     WIFI_MAC="${WIFI_MAC:-}"
@@ -87,6 +88,11 @@ load_config() {
         for segment_iface in "${SEGMENT_IFACES[@]}"; do
             SEGMENT_MACS+=("$(interface_mac "$segment_iface" 2>/dev/null || true)")
         done
+        config_migrated=yes
+    fi
+    if [[ "$config_migrated" == "yes" ]]; then
+        save_main_config
+        log "Migrated routed segment adapter identities into the ENRA configuration."
     fi
 }
 detect_platform() {
@@ -212,9 +218,12 @@ resolve_wireless_interface() {
 
     if [[ -n "$WIFI_IF" ]] && iw dev "$WIFI_IF" info >/dev/null 2>&1 && supports_ap_mode "$WIFI_IF"; then
         mac="$(interface_mac "$WIFI_IF" 2>/dev/null || true)"
-        if [[ -n "$mac" && "$mac" != "${WIFI_MAC:-}" ]]; then
+        if [[ -n "$mac" && ( "$mac" != "${WIFI_MAC:-}" || ( "$NETWORK_MODE" == "routed" && "$mac" != "${SEGMENT_MACS[0]:-}" ) ) ]]; then
             [[ -z "${WIFI_MAC:-}" ]] || ENRA_INTERFACE_REBOUND=yes
             WIFI_MAC="$mac"
+            if [[ "$NETWORK_MODE" == "routed" ]]; then
+                SEGMENT_MACS[0]="$mac"
+            fi
             save_main_config
             log "Saved Wi-Fi adapter identity: $WIFI_IF ($WIFI_MAC)."
         fi
@@ -1168,30 +1177,6 @@ interface_is_excluded() {
     return 1
 }
 
-recover_required_interface() {
-    local iface="$1"
-    [[ "$iface" == "$WIFI_IF" || "$iface" == "$UPLINK_IF" ]] || return 1
-    if ! configured_interfaces_ready; then
-        log "Required interface $iface appeared, but another required ENRA interface is still missing."
-        return 0
-    fi
-
-    log "All required ENRA interfaces are available. Recovering network services."
-    ip link set dev "$iface" up || {
-        warn "Could not bring newly detected interface $iface up; recovery will be retried on the next device event."
-        return 0
-    }
-    systemctl start enra-devices.service
-    systemctl reset-failed enra-network.service enra-ap.service enra-dnsmasq.service enra-hotplug-scan.service 2>/dev/null || true
-    systemctl start enra-network.service
-    systemctl start enra-ap.service
-    if [[ "$NETWORK_MODE" == "routed" ]]; then
-        systemctl start enra-dnsmasq.service
-    fi
-    systemctl start enra-hotplug-scan.service || warn "Network recovered, but the automatic NIC scan failed."
-    success "ENRA services recovered after interface $iface appeared."
-}
-
 hotplug_add() (
     require_root hotplug-add
     require_systemd
@@ -1285,6 +1270,10 @@ hotplug_add() (
 
     for ((index = 0; index < ${#SEGMENT_IFACES[@]}; index++)); do
         if [[ "$iface" == "${SEGMENT_IFACES[$index]}" ]]; then
+            if [[ -n "$mac" && "$mac" != "${SEGMENT_MACS[$index]:-}" ]]; then
+                SEGMENT_MACS[$index]="$mac"
+                save_main_config
+            fi
             if ip -4 -o address show dev "$iface" 2>/dev/null |
                 awk '{print $4}' | grep -Fxq "${SEGMENT_GATEWAYS[$index]}/${SEGMENT_PREFIXES[$index]}"; then
                 return 0
@@ -1801,7 +1790,7 @@ validate() {
     elif [[ "$NETWORK_MODE" == "routed" ]]; then
         validate_check warn "Upstream interface is currently absent: ${UPLINK_IF:-unset}. Routed clients will have no upstream access until it returns."
     else
-        validate_check fail "Bridge uplink interface is missing: ${UPLINK_IF:-unset}."
+        validate_check warn "Bridge uplink interface is missing: ${UPLINK_IF:-unset}. The Wi-Fi access point remains available without wired backhaul."
     fi
 
     [[ -s "$HOSTAPD_FILE" ]] &&
