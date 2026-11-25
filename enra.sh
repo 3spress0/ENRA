@@ -81,6 +81,13 @@ load_config() {
         SEGMENT_DHCP_STARTS=("$DHCP_START")
         SEGMENT_DHCP_ENDS=("$DHCP_END")
     fi
+    if [[ "$NETWORK_MODE" == "routed" && -z "${SEGMENT_MACS+x}" ]]; then
+        SEGMENT_MACS=()
+        local segment_iface
+        for segment_iface in "${SEGMENT_IFACES[@]}"; do
+            SEGMENT_MACS+=("$(interface_mac "$segment_iface" 2>/dev/null || true)")
+        done
+    fi
 }
 detect_platform() {
     [[ -r /etc/os-release ]] || die "Cannot identify this Linux distribution."
@@ -255,6 +262,7 @@ resolve_wireless_interface() {
     ENRA_INTERFACE_REBOUND=yes
     if [[ "$NETWORK_MODE" == "routed" && "${SEGMENT_IFACES[0]:-}" == "$old_iface" ]]; then
         SEGMENT_IFACES[0]="$candidate"
+        SEGMENT_MACS[0]="$WIFI_MAC"
     fi
 
     replace_interface_directive "$HOSTAPD_FILE" "$old_iface" "$candidate" interface
@@ -702,6 +710,7 @@ save_main_config() {
         printf 'ALLOW_INTER_SEGMENT_TRAFFIC=%q\n' "${ALLOW_INTER_SEGMENT_TRAFFIC:-false}"
         if [[ "$NETWORK_MODE" == "routed" ]]; then
             write_config_array SEGMENT_IFACES "${SEGMENT_IFACES[@]}"
+            write_config_array SEGMENT_MACS "${SEGMENT_MACS[@]}"
             write_config_array SEGMENT_NAMES "${SEGMENT_NAMES[@]}"
             write_config_array SEGMENT_GATEWAYS "${SEGMENT_GATEWAYS[@]}"
             write_config_array SEGMENT_PREFIXES "${SEGMENT_PREFIXES[@]}"
@@ -1273,6 +1282,7 @@ hotplug_add() (
     dhcp_end="${network%.*}.200"
     index="${#SEGMENT_IFACES[@]}"
     SEGMENT_IFACES+=("$iface")
+    SEGMENT_MACS+=("$(interface_mac "$iface" 2>/dev/null || true)")
     SEGMENT_NAMES+=("Ethernet $index")
     SEGMENT_GATEWAYS+=("$gateway")
     SEGMENT_PREFIXES+=("$prefix")
@@ -1754,6 +1764,7 @@ validate() {
 
         local segment_arrays_valid=yes array_length
         for array_length in \
+            "${#SEGMENT_MACS[@]}" \
             "${#SEGMENT_NAMES[@]}" \
             "${#SEGMENT_GATEWAYS[@]}" \
             "${#SEGMENT_PREFIXES[@]}" \
@@ -1916,6 +1927,7 @@ remove_segment() {
     expected_address="${SEGMENT_GATEWAYS[$index]}/${SEGMENT_PREFIXES[$index]}"
 
     SEGMENT_IFACES=("${SEGMENT_IFACES[@]:0:index}" "${SEGMENT_IFACES[@]:$((index + 1))}")
+    SEGMENT_MACS=("${SEGMENT_MACS[@]:0:index}" "${SEGMENT_MACS[@]:$((index + 1))}")
     SEGMENT_NAMES=("${SEGMENT_NAMES[@]:0:index}" "${SEGMENT_NAMES[@]:$((index + 1))}")
     SEGMENT_GATEWAYS=("${SEGMENT_GATEWAYS[@]:0:index}" "${SEGMENT_GATEWAYS[@]:$((index + 1))}")
     SEGMENT_PREFIXES=("${SEGMENT_PREFIXES[@]:0:index}" "${SEGMENT_PREFIXES[@]:$((index + 1))}")
