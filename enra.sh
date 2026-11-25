@@ -1418,6 +1418,13 @@ reconcile() (
         return 0
     fi
 
+    if [[ "$NETWORK_MODE" == "bridge" ]] && ip link show dev "$UPLINK_IF" >/dev/null 2>&1; then
+        if [[ ! -d "/sys/class/net/$BRIDGE_IF/bridge" || ! -L "/sys/class/net/$UPLINK_IF/master" ]]; then
+            ENRA_INTERFACE_REBOUND=yes
+            log "Bridge uplink $UPLINK_IF is not attached to $BRIDGE_IF; scheduling bridge recovery."
+        fi
+    fi
+
     local restart_stack=no
     if [[ ! -f /run/enra/wifi-ready || "$ENRA_INTERFACE_REBOUND" == "yes" ]]; then
         restart_stack=yes
