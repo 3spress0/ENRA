@@ -26,9 +26,7 @@ case "${1:-}" in
     *) die "Unknown option: $1. Use --help for usage." ;;
 esac
 
-if [[ -r /dev/tty ]]; then
-    exec </dev/tty
-elif [[ ! -t 0 ]]; then
+if [[ ! -r /dev/tty && ! -t 0 ]]; then
     RUN_SETUP=false
 fi
 
@@ -76,7 +74,11 @@ if [[ -r /etc/enra/enra.conf ]]; then
     "$INSTALL_PATH" refresh
 elif [[ "$RUN_SETUP" == "true" ]]; then
     printf '\n[ENRA installer] Starting the guided first-time setup...\n'
-    "$INSTALL_PATH" setup
+    if [[ -r /dev/tty ]]; then
+        "$INSTALL_PATH" setup </dev/tty
+    else
+        "$INSTALL_PATH" setup
+    fi
 else
     printf '[ENRA installer] Installation complete. Start setup with: sudo enra setup\n'
 fi
