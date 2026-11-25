@@ -674,7 +674,6 @@ EOF
     cat > /etc/systemd/system/enra-hotplug@.service <<'EOF'
 [Unit]
 Description=ENRA automatic network segment for %I
-After=enra-network.service
 
 [Service]
 Type=oneshot
@@ -973,6 +972,10 @@ recover_required_interface() {
     fi
 
     log "All required ENRA interfaces are available. Recovering network services."
+    ip link set dev "$iface" up || {
+        warn "Could not bring newly detected interface $iface up; recovery will be retried on the next device event."
+        return 0
+    }
     systemctl start enra-devices.service
     systemctl reset-failed enra-network.service enra-ap.service enra-dnsmasq.service enra-hotplug-scan.service 2>/dev/null || true
     systemctl start enra-network.service
@@ -1309,6 +1312,7 @@ service_report() {
 
 
 status() {
+    local iface
     print_banner
     [[ -f "$CONFIG_FILE" ]] || die "ENRA is not configured. Run: sudo enra setup"
     load_config
@@ -1336,6 +1340,14 @@ status() {
         service_report "DHCP/DNS (dnsmasq)" enra-dnsmasq.service
     fi
 
+    printf '\nConfigured interface availability:\n'
+    for iface in "$WIFI_IF" "$UPLINK_IF"; do
+        if ip link show dev "$iface" >/dev/null 2>&1; then
+            printf '  [PRESENT] %s\n' "$iface"
+        else
+            printf '  [MISSING] %s\n' "$iface"
+        fi
+    done
     printf '\nNetwork addresses:\n'; ip -br addr || true
     printf '\nWireless interface state:\n'; iw dev || true
     printf '\nENRA logs:\n'; journalctl -u enra-network.service -u enra-ap.service -u enra-dnsmasq.service -n 30 --no-pager || true
@@ -1836,6 +1848,7 @@ Usage:
   sudo enra setup       Interactive installation and configuration
   sudo enra status      Show configuration and service health
   sudo enra /validate   Check configuration, interfaces, firewall and services
+  sudo enra preflight   Check whether required interfaces are available
   sudo enra /config     Edit the main ENRA configuration
   sudo enra /config show  Print the main ENRA configuration
   sudo enra update      Download and install the latest GitHub version
