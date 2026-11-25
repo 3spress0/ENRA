@@ -878,7 +878,7 @@ EOF
     cat > /etc/systemd/system/enra-hotplug-scan.service <<'EOF'
 [Unit]
 Description=ENRA scan for unassigned Ethernet interfaces
-Requires=enra-network.service enra-ap.service
+Wants=enra-network.service enra-ap.service
 After=enra-network.service enra-ap.service enra-dnsmasq.service
 
 [Service]
@@ -931,7 +931,7 @@ EOF
     cat > /etc/systemd/system/enra-ap.service <<EOF
 [Unit]
 Description=ENRA wireless access point
-Requires=enra-network.service
+Wants=enra-network.service
 After=enra-network.service
 
 [Service]
@@ -950,7 +950,7 @@ EOF
         cat > /etc/systemd/system/enra-dnsmasq.service <<EOF
 [Unit]
 Description=ENRA DHCP and DNS service
-Requires=enra-network.service enra-ap.service
+Wants=enra-network.service enra-ap.service
 After=enra-network.service enra-ap.service
 
 [Service]
