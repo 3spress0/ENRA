@@ -214,6 +214,9 @@ wireless_ap_interfaces() {
 
 resolve_wireless_interface() {
     local old_iface="$WIFI_IF" iface candidate="" mac candidates count=0
+    if [[ -n "${DRIVER_MODULE:-}" ]]; then
+        modprobe "$DRIVER_MODULE" >/dev/null 2>&1 || warn "Could not load the configured Wi-Fi driver module: $DRIVER_MODULE"
+    fi
     command -v rfkill >/dev/null 2>&1 && rfkill unblock wifi >/dev/null 2>&1 || true
 
     if [[ -n "$WIFI_IF" ]] && iw dev "$WIFI_IF" info >/dev/null 2>&1 && supports_ap_mode "$WIFI_IF"; then
