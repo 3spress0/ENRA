@@ -20,6 +20,7 @@ require_rule "$INSTALL_SCRIPT" "Installer can run setup automatically" '"$INSTAL
 require_rule "$INSTALL_SCRIPT" "Installer supports install-only mode" '--install-only'
 require_rule "$INSTALL_SCRIPT" "Piped installer reads prompts from the terminal" 'setup </dev/tty'
 require_rule "$ENRA_SCRIPT" "Wi-Fi adapters are filtered by access-point support" 'mapfile -t choices < <(wireless_ap_interfaces)'
+require_rule "$ENRA_SCRIPT" "Only wired adapters are selectable for Ethernet roles" '[[ "$kind" == "Wired" ]] || continue'
 require_rule "$ENRA_SCRIPT" "Interface choices include link state" 'interface_link_label "$iface"'
 require_rule "$ENRA_SCRIPT" "Interface choices include current IPv4 address" 'interface_ipv4_label "$iface"'
 require_rule "$ENRA_SCRIPT" "The computer default route is protected for bridge mode" 'In use; not selectable'
