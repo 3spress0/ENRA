@@ -1191,7 +1191,7 @@ hotplug_add() (
     require_root hotplug-add
     require_systemd
     [[ "$#" -eq 1 ]] || die "Usage: sudo enra hotplug-add <interface>"
-    local iface="$1" path index gateway prefix network dhcp_start dhcp_end
+    local iface="$1" path index gateway prefix network dhcp_start dhcp_end mac old_iface
     local config_backup dnsmasq_backup
 
     install -d -m 0755 /run/lock
@@ -1231,6 +1231,48 @@ hotplug_add() (
     if iw dev 2>/dev/null | awk '$1 == "Interface" {print $2}' | grep -Fxq "$iface"; then
         return 0
     fi
+
+    mac="$(interface_mac "$iface" 2>/dev/null || true)"
+    for ((index = 1; index < ${#SEGMENT_IFACES[@]}; index++)); do
+        old_iface="${SEGMENT_IFACES[$index]}"
+        if [[ "$old_iface" != "$iface" && ! -d "/sys/class/net/$old_iface" && -n "$mac" && "$mac" == "${SEGMENT_MACS[$index]:-}" ]]; then
+            log "Restoring saved Ethernet segment ${SEGMENT_NAMES[$index]} on reconnected adapter $iface."
+            config_backup="$(mktemp "$CONFIG_DIR/.enra.conf.backup.XXXXXX")"
+            dnsmasq_backup="$(mktemp "$CONFIG_DIR/.dnsmasq.conf.backup.XXXXXX")"
+            cp -a "$CONFIG_FILE" "$config_backup"
+            cp -a "$DNSMASQ_FILE" "$dnsmasq_backup"
+            SEGMENT_IFACES[$index]="$iface"
+            SEGMENT_MACS[$index]="$mac"
+
+            if ! save_main_config || ! write_dnsmasq_config || ! ip link set dev "$iface" up; then
+                cp -a "$config_backup" "$CONFIG_FILE"
+                cp -a "$dnsmasq_backup" "$DNSMASQ_FILE"
+                rm -f "$config_backup" "$dnsmasq_backup"
+                die "Could not restore saved segment $old_iface on $iface. Previous configuration restored."
+            fi
+
+            rm -f "/etc/systemd/network/00-enra-$old_iface.network"
+            configure_network_manager
+            configure_networkd_unmanaged
+            if ! systemctl restart enra-network.service || ! systemctl restart enra-dnsmasq.service; then
+                warn "Applying the restored Ethernet segment failed. Rolling back."
+                cp -a "$config_backup" "$CONFIG_FILE"
+                cp -a "$dnsmasq_backup" "$DNSMASQ_FILE"
+                load_config
+                configure_network_manager
+                configure_networkd_unmanaged
+                systemctl restart enra-network.service || warn "Network rollback failed; inspect ENRA logs."
+                systemctl restart enra-dnsmasq.service || warn "DHCP/DNS rollback failed; inspect ENRA logs."
+                rm -f "$config_backup" "$dnsmasq_backup"
+                die "Could not restore saved segment on $iface. Previous configuration restored."
+            fi
+
+            rm -f "$config_backup" "$dnsmasq_backup"
+            success "Restored ${SEGMENT_NAMES[$index]} on $iface using its saved subnet ${SEGMENT_NETWORKS[$index]}."
+            return 0
+        fi
+    done
+
     if interface_is_excluded "$iface"; then
         log "Skipping excluded interface: $iface"
         return 0
@@ -1385,12 +1427,11 @@ reconcile() (
     local restart_stack=no
     if [[ ! -f /run/enra/wifi-ready || "$ENRA_INTERFACE_REBOUND" == "yes" ]]; then
         restart_stack=yes
-        install -d -m 0700 /run/enra
-        touch /run/enra/wifi-ready
     fi
 
     systemctl start enra-devices.service || warn "Could not start ENRA device bring-up service."
     ip link set dev "$WIFI_IF" up || {
+        rm -f /run/enra/wifi-ready
         warn "Could not bring Wi-Fi interface $WIFI_IF up. Waiting for the next device event."
         return 0
     }
@@ -1398,22 +1439,26 @@ reconcile() (
     systemctl reset-failed enra-network.service enra-ap.service enra-dnsmasq.service enra-hotplug-scan.service 2>/dev/null || true
     if [[ "$restart_stack" == "yes" ]] && systemctl is-active --quiet enra-network.service; then
         systemctl restart enra-network.service || {
+            rm -f /run/enra/wifi-ready
             warn "ENRA network configuration could not restart after an adapter change. Inspect 'enra logs'."
             return 0
         }
     elif ! systemctl is-active --quiet enra-network.service; then
         systemctl start enra-network.service || {
+            rm -f /run/enra/wifi-ready
             warn "ENRA network configuration could not start. Inspect 'enra logs'."
             return 0
         }
     fi
     if [[ "$restart_stack" == "yes" ]] && systemctl is-active --quiet enra-ap.service; then
         systemctl restart enra-ap.service || {
+            rm -f /run/enra/wifi-ready
             warn "ENRA access point could not restart after an adapter change. Inspect 'enra logs'."
             return 0
         }
     elif ! systemctl is-active --quiet enra-ap.service; then
         systemctl start enra-ap.service || {
+            rm -f /run/enra/wifi-ready
             warn "ENRA access point could not start. Inspect 'enra logs'."
             return 0
         }
@@ -1425,6 +1470,8 @@ reconcile() (
             systemctl start enra-dnsmasq.service || warn "ENRA DHCP/DNS could not start. Inspect 'enra logs'."
         fi
     fi
+    mkdir -p /run/enra
+    touch /run/enra/wifi-ready
     if ! systemctl is-active --quiet enra-hotplug-scan.service; then
         systemctl start enra-hotplug-scan.service || warn "ENRA NIC integration scan could not start."
     fi
@@ -2007,6 +2054,7 @@ disable_services() {
     rm -f /etc/udev/rules.d/90-enra-hotplug.rules
     udevadm control --reload-rules 2>/dev/null || true
     systemctl stop 'enra-hotplug@*.service' "${units[@]}" 2>/dev/null || true
+    rm -f /run/enra/wifi-ready
     if (("${#units[@]}" > 0)); then
         systemctl disable "${units[@]}" >/dev/null || true
     fi
