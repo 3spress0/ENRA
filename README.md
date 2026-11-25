@@ -35,6 +35,8 @@ sudo enra status
 - Uses an existing kernel driver where available; it does not assume every adapter is Realtek.
 - Optional RTL8821AU DKMS installation when USB ID **0bda:0811** is detected and no wireless interface exists.
 - Graceful warning and exit when no wireless interface is available; base dependencies remain installed.
+- Missing configured Wi-Fi or upstream interfaces defer ENRA service startup without cascading systemd failures; validation reports the root cause and skips dependent firewall/service checks.
+- Automatic recovery when a configured Wi-Fi or upstream interface is reconnected; ENRA retries the network, access point and DHCP/DNS services.
 - Kernel-header fallback for DKMS builds. On Debian, if headers for the running kernel are unavailable, ENRA installs the current kernel and matching headers and asks for a reboot before continuing.
 - Boot-time discovery and link bring-up for all detected hardware-backed network interfaces.
 - Udev hotplug handling and boot-time reconciliation that add eligible Ethernet NICs as isolated routed segments automatically, up to the 32-segment limit.
@@ -167,6 +169,8 @@ sudo enra setup
 
 Use **`enra status`** to inspect the ENRA-owned service units, startup state, network addresses, wireless mode and recent logs. Checking `systemctl status hostapd` or `systemctl status dnsmasq` does not show ENRA service health.
 Use **`enra /validate`** to run read-only checks against the saved configuration, required commands, wireless AP capability/state, routed-mode dnsmasq configuration, gateway address, IPv4 forwarding, nftables table and ENRA-managed systemd services. It returns a non-zero exit status when a blocking check fails. The shorter alias **`enra validate`** is also accepted.
+
+Use **`enra preflight`** to check whether the configured Wi-Fi and upstream interfaces are currently present. If either is missing, ENRA defers network startup instead of creating a cascade of failed dependent services. When the configured interface is reconnected, the udev hotplug handler retries ENRA startup automatically. In a virtual machine, USB Wi-Fi adapters must be attached to the guest; ENRA cannot recover hardware that the hypervisor has not passed through.
 
 ENRA uses its own systemd units: **enra-devices.service**, **enra-network.service**, **enra-ap.service** and **enra-hotplug-scan.service**. Routed mode also uses **enra-dnsmasq.service**. Services are enabled during setup and start on boot. The device service runs after the network managers and udev settle, discovers hardware-backed interfaces under **/sys/class/net**, and sets their link state to UP. The hotplug scan reconciles all current NICs after ENRA networking starts. The **enra-hotplug@.service** template handles later udev add events. The device service excludes loopback and ENRA's bridge. The installer starts these units directly and does not depend on the distribution-provided **hostapd.service** or **dnsmasq.service**. On Debian, **hostapd.service** may be masked by the package and **dnsmasq-base** may not provide a **dnsmasq.service** unit; neither condition prevents ENRA from working. Do not unmask or start the distribution units to operate ENRA.
 

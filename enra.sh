@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly ENRA_VERSION="0.6.1"
+readonly ENRA_VERSION="0.6.2"
 readonly CONFIG_DIR="/etc/enra"
 readonly CONFIG_FILE="$CONFIG_DIR/enra.conf"
 readonly HOSTAPD_FILE="$CONFIG_DIR/hostapd.conf"
@@ -674,7 +674,6 @@ EOF
     cat > /etc/systemd/system/enra-hotplug@.service <<'EOF'
 [Unit]
 Description=ENRA automatic network segment for %I
-After=enra-network.service
 
 [Service]
 Type=oneshot
@@ -689,6 +688,7 @@ After=enra-network.service enra-ap.service enra-dnsmasq.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+ExecCondition=/usr/local/sbin/enra preflight
 ExecStart=/usr/local/sbin/enra hotplug-scan
 
 [Install]
@@ -710,6 +710,7 @@ Before=enra-ap.service enra-dnsmasq.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+ExecCondition=/usr/local/sbin/enra preflight
 ExecStart=/usr/local/sbin/enra network-up
 ExecStop=/usr/local/sbin/enra network-down
 
@@ -724,6 +725,7 @@ After=enra-network.service
 
 [Service]
 Type=simple
+ExecCondition=/usr/local/sbin/enra preflight
 ExecStartPre=/usr/local/sbin/enra driver-load
 ExecStart=$hostapd_bin $HOSTAPD_FILE
 Restart=on-failure
@@ -742,6 +744,7 @@ After=enra-network.service enra-ap.service
 
 [Service]
 Type=simple
+ExecCondition=/usr/local/sbin/enra preflight
 ExecStart=$dnsmasq_bin --no-daemon --conf-file=$DNSMASQ_FILE --pid-file=/run/enra-dnsmasq.pid
 Restart=on-failure
 RestartSec=5
@@ -960,6 +963,30 @@ interface_is_excluded() {
     return 1
 }
 
+recover_required_interface() {
+    local iface="$1"
+    [[ "$iface" == "$WIFI_IF" || "$iface" == "$UPLINK_IF" ]] || return 1
+    if ! configured_interfaces_ready; then
+        log "Required interface $iface appeared, but another required ENRA interface is still missing."
+        return 0
+    fi
+
+    log "All required ENRA interfaces are available. Recovering network services."
+    ip link set dev "$iface" up || {
+        warn "Could not bring newly detected interface $iface up; recovery will be retried on the next device event."
+        return 0
+    }
+    systemctl start enra-devices.service
+    systemctl reset-failed enra-network.service enra-ap.service enra-dnsmasq.service enra-hotplug-scan.service 2>/dev/null || true
+    systemctl start enra-network.service
+    systemctl start enra-ap.service
+    if [[ "$NETWORK_MODE" == "routed" ]]; then
+        systemctl start enra-dnsmasq.service
+    fi
+    systemctl start enra-hotplug-scan.service || warn "Network recovered, but the automatic NIC scan failed."
+    success "ENRA services recovered after interface $iface appeared."
+}
+
 hotplug_add() (
     require_root hotplug-add
     require_systemd
@@ -972,8 +999,12 @@ hotplug_add() (
     flock -w 60 9 || die "Timed out waiting for another ENRA interface update."
 
     load_config
+    if [[ "$iface" == "$WIFI_IF" || "$iface" == "$UPLINK_IF" ]]; then
+        recover_required_interface "$iface"
+        return 0
+    fi
     if ! systemctl is-active --quiet enra-network.service; then
-        log "ENRA network service is not active; ignoring hotplug event."
+        log "ENRA network service is not active; ignoring non-core interface event."
         return 0
     fi
     case "${AUTO_ADD_INTERFACES,,}" in
@@ -1118,6 +1149,23 @@ scan_new_interfaces() {
     done
 }
 
+configured_interfaces_ready() {
+    local iface ready=yes
+    for iface in "$WIFI_IF" "$UPLINK_IF"; do
+        if [[ -z "$iface" ]] || ! ip link show dev "$iface" >/dev/null 2>&1; then
+            warn "Required ENRA interface is unavailable: ${iface:-unset}."
+            ready=no
+        fi
+    done
+    [[ "$ready" == "yes" ]]
+}
+
+preflight() {
+    require_root preflight
+    load_config
+    configured_interfaces_ready || return 1
+}
+
 check_missing_segments() {
     [[ "$NETWORK_MODE" == "routed" ]] || return 0
 
@@ -1136,6 +1184,7 @@ check_missing_segments() {
 network_up() {
     require_root network-up
     load_config
+    configured_interfaces_ready || die "ENRA cannot configure networking until the configured Wi-Fi and upstream interfaces are available."
     check_missing_segments
     if [[ "$NETWORK_MODE" == "bridge" ]]; then
         ip link show dev "$WIFI_IF" >/dev/null 2>&1 || die "Wireless interface not found: $WIFI_IF"
@@ -1263,6 +1312,7 @@ service_report() {
 
 
 status() {
+    local iface
     print_banner
     [[ -f "$CONFIG_FILE" ]] || die "ENRA is not configured. Run: sudo enra setup"
     load_config
@@ -1290,6 +1340,14 @@ status() {
         service_report "DHCP/DNS (dnsmasq)" enra-dnsmasq.service
     fi
 
+    printf '\nConfigured interface availability:\n'
+    for iface in "$WIFI_IF" "$UPLINK_IF"; do
+        if ip link show dev "$iface" >/dev/null 2>&1; then
+            printf '  [PRESENT] %s\n' "$iface"
+        else
+            printf '  [MISSING] %s\n' "$iface"
+        fi
+    done
     printf '\nNetwork addresses:\n'; ip -br addr || true
     printf '\nWireless interface state:\n'; iw dev || true
     printf '\nENRA logs:\n'; journalctl -u enra-network.service -u enra-ap.service -u enra-dnsmasq.service -n 30 --no-pager || true
@@ -1307,6 +1365,10 @@ validate_check() {
 
 validate_service() {
     local label="$1" unit="$2" active enabled
+    if [[ "${ENRA_RUNTIME_READY:-yes}" != "yes" && "$unit" != "enra-devices.service" ]]; then
+        validate_check warn "$label service state is not evaluated until required interfaces return."
+        return
+    fi
     if ! systemctl cat "$unit" >/dev/null 2>&1; then
         validate_check fail "$label unit is missing: $unit"
         return
@@ -1387,6 +1449,9 @@ validate() {
         validate_check pass "ENRA hostapd configuration exists." ||
         validate_check fail "ENRA hostapd configuration is missing or empty: $HOSTAPD_FILE"
 
+    ENRA_RUNTIME_READY=yes
+    configured_interfaces_ready || ENRA_RUNTIME_READY=no
+
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         local segment_count="${#SEGMENT_IFACES[@]}"
         (( segment_count > 0 )) &&
@@ -1412,14 +1477,18 @@ validate() {
         for ((i = 0; i < segment_count; i++)); do
             if ip link show dev "${SEGMENT_IFACES[$i]}" >/dev/null 2>&1; then
                 validate_check pass "Segment ${SEGMENT_NAMES[$i]} interface exists: ${SEGMENT_IFACES[$i]}."
+                if [[ "$ENRA_RUNTIME_READY" != "yes" ]]; then
+                    validate_check warn "Segment ${SEGMENT_NAMES[$i]} gateway assignment is not evaluated until required interfaces return."
+                elif ip -4 -o address show dev "${SEGMENT_IFACES[$i]}" 2>/dev/null |
+                    awk '{print $4}' | grep -Fxq "${SEGMENT_GATEWAYS[$i]}/${SEGMENT_PREFIXES[$i]}"; then
+                    validate_check pass "Segment ${SEGMENT_NAMES[$i]} gateway ${SEGMENT_GATEWAYS[$i]}/${SEGMENT_PREFIXES[$i]} is assigned."
+                else
+                    validate_check fail "Segment ${SEGMENT_NAMES[$i]} gateway is not assigned to ${SEGMENT_IFACES[$i]}."
+                fi
+            elif [[ "${SEGMENT_IFACES[$i]}" == "$WIFI_IF" ]]; then
+                validate_check warn "Wi-Fi segment interface check is covered by the missing wireless-interface check above."
             else
-                validate_check fail "Segment ${SEGMENT_NAMES[$i]} interface is missing: ${SEGMENT_IFACES[$i]}."
-            fi
-            if ip -4 -o address show dev "${SEGMENT_IFACES[$i]}" 2>/dev/null |
-                awk '{print $4}' | grep -Fxq "${SEGMENT_GATEWAYS[$i]}/${SEGMENT_PREFIXES[$i]}"; then
-                validate_check pass "Segment ${SEGMENT_NAMES[$i]} gateway ${SEGMENT_GATEWAYS[$i]}/${SEGMENT_PREFIXES[$i]} is assigned."
-            else
-                validate_check fail "Segment ${SEGMENT_NAMES[$i]} gateway is not assigned to ${SEGMENT_IFACES[$i]}."
+                validate_check warn "Ethernet segment ${SEGMENT_NAMES[$i]} is temporarily absent; its saved subnet is reserved until the NIC returns."
             fi
             [[ -n "${SEGMENT_NETWORKS[$i]}" && -n "${SEGMENT_DHCP_STARTS[$i]}" && -n "${SEGMENT_DHCP_ENDS[$i]}" ]] &&
                 validate_check pass "Segment ${SEGMENT_NAMES[$i]} has a network and DHCP range." ||
@@ -1438,16 +1507,22 @@ validate() {
             validate_check fail "dnsmasq executable is missing (Debian package: dnsmasq-base)."
         fi
 
-        [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)" == "1" ]] &&
-            validate_check pass "IPv4 forwarding is enabled." ||
-            validate_check fail "IPv4 forwarding is disabled."
+        if [[ "$ENRA_RUNTIME_READY" == "yes" ]]; then
+            [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)" == "1" ]] &&
+                validate_check pass "IPv4 forwarding is enabled." ||
+                validate_check fail "IPv4 forwarding is disabled."
 
-        nft list table inet enra >/dev/null 2>&1 &&
-            validate_check pass "ENRA nftables table is loaded." ||
-            validate_check fail "ENRA nftables table is missing. Check enra-network.service."
+            nft list table inet enra >/dev/null 2>&1 &&
+                validate_check pass "ENRA nftables table is loaded." ||
+                validate_check fail "ENRA nftables table is missing. Check enra-network.service."
+        else
+            validate_check warn "Forwarding and firewall checks skipped because a required interface is missing."
+        fi
 
         local firewall_rules expected_spoof_rule
-        if firewall_rules="$(nft list chain inet enra forward 2>/dev/null)"; then
+        if [[ "$ENRA_RUNTIME_READY" != "yes" ]]; then
+            :
+        elif firewall_rules="$(nft list chain inet enra forward 2>/dev/null)"; then
             for ((i = 0; i < segment_count; i++)); do
                 [[ -d "/sys/class/net/${SEGMENT_IFACES[$i]}" ]] || continue
                 expected_spoof_rule="iifname \"${SEGMENT_IFACES[$i]}\" meta nfproto ipv4 ip saddr != ${SEGMENT_NETWORKS[$i]} drop"
@@ -1467,9 +1542,13 @@ validate() {
             validate_check warn "No default route currently uses $UPLINK_IF; routed clients may not have internet access."
         fi
     elif [[ "$NETWORK_MODE" == "bridge" ]]; then
-        ip link show dev "$BRIDGE_IF" >/dev/null 2>&1 &&
-            validate_check pass "ENRA bridge exists: $BRIDGE_IF." ||
+        if [[ "$ENRA_RUNTIME_READY" != "yes" ]]; then
+            validate_check warn "Bridge state is not evaluated until required interfaces return."
+        elif ip link show dev "$BRIDGE_IF" >/dev/null 2>&1; then
+            validate_check pass "ENRA bridge exists: $BRIDGE_IF."
+        else
             validate_check fail "ENRA bridge is missing: $BRIDGE_IF."
+        fi
     fi
 
     printf '\nENRA-managed services:\n'
@@ -1498,7 +1577,12 @@ start() {
     install_services
     systemctl daemon-reload
     udevadm control --reload-rules 2>/dev/null || true
-    systemctl start enra-devices.service enra-network.service enra-ap.service
+    systemctl start enra-devices.service
+    if ! configured_interfaces_ready; then
+        warn "ENRA startup is deferred. Connect the configured Wi-Fi adapter and upstream NIC; ENRA will retry when either device appears."
+        return 0
+    fi
+    systemctl start enra-network.service enra-ap.service
     [[ "$NETWORK_MODE" != "routed" ]] || systemctl start enra-dnsmasq.service
     systemctl start enra-hotplug-scan.service
 }
@@ -1742,6 +1826,12 @@ refresh() {
         systemctl disable enra-dnsmasq.service >/dev/null 2>&1 || true
     fi
     systemctl restart enra-devices.service
+    if ! configured_interfaces_ready; then
+        systemctl stop enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
+        warn "ENRA files and systemd units were updated, but networking was not started because a configured Wi-Fi or upstream interface is missing."
+        warn "Connect the missing hardware or restore VM USB/network passthrough. ENRA will retry when the interface appears."
+        return 0
+    fi
     systemctl restart enra-network.service
     systemctl restart enra-ap.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
@@ -1764,6 +1854,7 @@ Usage:
   sudo enra setup       Interactive installation and configuration
   sudo enra status      Show configuration and service health
   sudo enra /validate   Check configuration, interfaces, firewall and services
+  sudo enra preflight   Check whether required interfaces are available
   sudo enra /config     Edit the main ENRA configuration
   sudo enra /config show  Print the main ENRA configuration
   sudo enra update      Download and install the latest GitHub version
@@ -1803,6 +1894,7 @@ ACTION="${1:-help}"
 case "$ACTION" in
     setup) setup ;;
     status) status ;;
+    preflight) preflight ;;
     validate|/validate) validate ;;
     config|/config) config "${@:2}" ;;
     update) update ;;
