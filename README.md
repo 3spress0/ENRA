@@ -2,26 +2,52 @@
 
 **espress0's Network Routing Architecture**
 
-ENRA is a configurable Linux access-point and network-edge utility built around hostapd, nl80211, Linux networking and systemd. It supports multiple package families, wireless adapters with Linux AP-mode support, radio settings, security profiles and two common network topologies. Adapter driver installation is deliberately separate from AP configuration: ENRA will not guess and replace arbitrary third-party drivers.
+ENRA turns a Linux computer into a configurable Wi-Fi access point and network router. It detects supported network adapters, configures the required Linux services and keeps the access point available when a cable or adapter is temporarily disconnected.
 
-## TL;DR - Quickstart
+## Install and start
 
-```bash
-git clone https://github.com/3spress0/ENRA.git
-cd ENRA
-sudo ./install.sh
-sudo enra setup
-```
-
-Setup is interactive. Choose **bridge** when an existing router handles DHCP and firewalling, or **routed** when ENRA should provide multiple isolated IPv4 segments with DHCP and NAT. WPA3-Personal is the default, but requires compatible Wi-Fi hardware, drivers, firmware and clients.
-
-After setup:
+Open a terminal and run this single command:
 
 ```bash
-sudo enra status
+curl -fsSL https://raw.githubusercontent.com/3spress0/ENRA/main/install.sh | sudo bash
 ```
+
+The installer downloads ENRA, installs its required packages and starts the guided setup automatically. You do not need to clone the repository or edit configuration files.
+
+On first run, the setup will:
+1. Detect your Wi-Fi adapter and show a numbered list if more than one is available.
+2. Ask how Wi-Fi should connect to your network.
+3. Show a numbered list of wired adapters, including their connection state and current IP address.
+4. Apply safe network defaults, then ask you to choose a Wi-Fi name and password.
+5. Start ENRA and show how to connect your devices.
+
+Press Enter to accept a recommended default. Your Wi-Fi password is not displayed after setup, so keep a copy of it.
+
+To install without starting the wizard, clone the repository and run sudo ./install.sh --install-only, then run sudo enra setup when ready.
+
+## Which network mode should I choose?
+
+| Choose | What it does | Use it when |
+|---|---|---|
+| **Join my existing network (Bridge)** | ENRA adds Wi-Fi to the same network as the wired connection. Your existing router/firewall still handles IP addresses and network policy. | You already have a router or firewall such as OPNsense and want another access point. |
+| **Create a separate network (Routed)** | ENRA creates a separate Wi-Fi network and handles device addresses, routing, NAT and isolation. | You want devices on ENRA to be on a different network behind your existing router. |
+
+Bridge mode requires a separate wired adapter for the network being extended. ENRA deliberately protects the adapter carrying the computer's current default internet route. Do not choose the computer's only management/internet connection as a bridge port.
+
+For most installations, the Wi-Fi network is the only ENRA segment needed. Additional wired network segments are optional.
+
+## Requirements
+
+- A systemd-based Linux distribution using APT, DNF, Pacman or Zypper.
+- A Wi-Fi adapter and Linux driver that support access-point mode.
+- A wired adapter for bridge mode, or a wired upstream connection for routed mode.
+- Root access to install packages and configure network services.
+
+ENRA cannot use a USB/network adapter that the operating system or virtual machine does not detect. For a virtual machine, connect the virtual network adapter or pass the USB Wi-Fi adapter through to the guest before starting setup.
 
 ## Features
+
+
 
 - Interactive setup with wireless hardware and interface discovery.
 - Layer 2 bridge mode or multi-segment routed/NAT mode.
