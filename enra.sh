@@ -902,7 +902,7 @@ EOF
 [Unit]
 Description=ENRA monitor for network adapter and carrier changes
 Wants=network-pre.target
-After=network-pre.target systemd-udevd.service enra-devices.service
+After=network-pre.target systemd-udevd.service enra-devices.service enra-network.service enra-ap.service enra-dnsmasq.service
 
 [Service]
 Type=simple
