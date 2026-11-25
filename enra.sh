@@ -694,10 +694,12 @@ PY
 
 configure_interfaces() {
     local segment_count selected i default_gateway gateway prefix start end network existing
+    local customize add_segments
+
     if [[ "$NETWORK_MODE" == "bridge" ]]; then
-        UPLINK_IF="$(choose_interface "Interface connected to the LAN being bridged" yes)"
+        UPLINK_IF="$(choose_interface "Select the wired adapter connected to the network you want Wi-Fi to join." yes)"
         UPLINK_MAC="$(interface_mac "$UPLINK_IF" 2>/dev/null || true)"
-        [[ "$UPLINK_IF" != "$WIFI_IF" ]] || die "Wired and wireless interfaces must be different."
+        [[ "$UPLINK_IF" != "$WIFI_IF" ]] || die "The Wi-Fi adapter and wired adapter must be different."
         validate_bridge_port "$UPLINK_IF"
         AP_GATEWAY="" AP_PREFIX="" AP_NETWORK="" DHCP_START="" DHCP_END="" DNS_UPSTREAM=""
         SEGMENT_IFACES=() SEGMENT_NAMES=() SEGMENT_GATEWAYS=() SEGMENT_PREFIXES=()
@@ -705,14 +707,11 @@ configure_interfaces() {
         return 0
     fi
 
-    UPLINK_IF="$(choose_interface "Internet/upstream interface" no)"
+    UPLINK_IF="$(choose_interface "Select the adapter connected to your existing router/internet." no)"
     UPLINK_MAC="$(interface_mac "$UPLINK_IF" 2>/dev/null || true)"
-    [[ "$UPLINK_IF" != "$WIFI_IF" ]] || die "AP and uplink interfaces must be different."
+    [[ "$UPLINK_IF" != "$WIFI_IF" ]] || die "The Wi-Fi adapter and internet adapter must be different."
 
-    DNS_UPSTREAM=""
-    read -r -p "Upstream DNS server [1.1.1.1]: " DNS_UPSTREAM
-    DNS_UPSTREAM="${DNS_UPSTREAM:-1.1.1.1}"
-
+    DNS_UPSTREAM="1.1.1.1"
     SEGMENT_IFACES=("$WIFI_IF")
     SEGMENT_MACS=("$WIFI_MAC")
     SEGMENT_NAMES=("Wi-Fi")
@@ -722,31 +721,56 @@ configure_interfaces() {
     SEGMENT_DHCP_STARTS=()
     SEGMENT_DHCP_ENDS=()
 
-    read -r -p "Wi-Fi segment gateway IPv4 [10.42.0.1]: " gateway
-    gateway="${gateway:-10.42.0.1}"
-    read -r -p "Wi-Fi segment subnet prefix [24]: " prefix
-    prefix="${prefix:-24}"
-    read -r -p "Wi-Fi DHCP range start [10.42.0.50]: " start
-    start="${start:-10.42.0.50}"
-    read -r -p "Wi-Fi DHCP range end [10.42.0.200]: " end
-    end="${end:-10.42.0.200}"
-    network="$(validate_segment_network "$gateway" "$prefix" "$start" "$end" "$DNS_UPSTREAM")" ||
-        die "Invalid Wi-Fi segment network settings."
+    gateway="10.42.0.1"
+    prefix="24"
+    start="10.42.0.50"
+    end="10.42.0.200"
+    if ! network="$(validate_segment_network "$gateway" "$prefix" "$start" "$end" "$DNS_UPSTREAM" 2>/dev/null)"; then
+        warn "The recommended Wi-Fi subnet is already in use. ENRA will select an unused subnet automatically."
+        network="$(next_segment_network)" || die "ENRA could not find an unused Wi-Fi subnet. Connect the adapters you need, then try again."
+        gateway="${network%/*}"
+        gateway="${gateway%.*}.1"
+        start="${gateway%.*}.50"
+        end="${gateway%.*}.200"
+    fi
+
+    printf '\nENRA has selected safe default network settings for Wi-Fi:\n' >&2
+    printf '  Gateway: %s\n  Device address range: %s-%s\n' "$gateway" "$start" "$end" >&2
+    read -r -p "Do you need to customize these network settings? [y/N]: " customize
+    if [[ "$customize" =~ ^[Yy]$ ]]; then
+        read -r -p "Wi-Fi gateway address [$gateway]: " selected
+        gateway="${selected:-$gateway}"
+        read -r -p "Subnet prefix length [$prefix]: " selected
+        prefix="${selected:-$prefix}"
+        read -r -p "First device address [$start]: " selected
+        start="${selected:-$start}"
+        read -r -p "Last device address [$end]: " selected
+        end="${selected:-$end}"
+        network="$(validate_segment_network "$gateway" "$prefix" "$start" "$end" "$DNS_UPSTREAM")" ||
+            die "The custom Wi-Fi network settings are invalid or overlap an existing network."
+    fi
+
     SEGMENT_GATEWAYS+=("$gateway")
     SEGMENT_PREFIXES+=("$prefix")
     SEGMENT_NETWORKS+=("$network")
     SEGMENT_DHCP_STARTS+=("$start")
     SEGMENT_DHCP_ENDS+=("$end")
 
-    printf '\\nEach Ethernet segment needs a dedicated interface and receives its own isolated IPv4 subnet.\\n'
-    read -r -p "Additional Ethernet LAN segments [0]: " segment_count
-    segment_count="${segment_count:-0}"
-    [[ "$segment_count" =~ ^(0|[1-9][0-9]*)$ ]] || die "Enter a whole number of additional Ethernet segments."
-    (( segment_count <= 32 )) || die "ENRA supports up to 32 additional Ethernet segments per instance."
+    printf '\nMost installations only need the Wi-Fi network.\n' >&2
+    printf 'Only add wired segments when you have extra Ethernet adapters connected for separate networks.\n' >&2
+    read -r -p "Add additional wired network segments? [y/N]: " add_segments
+    if [[ "$add_segments" =~ ^[Yy]$ ]]; then
+        read -r -p "How many additional wired adapters? [1]: " segment_count
+        segment_count="${segment_count:-1}"
+    else
+        segment_count=0
+    fi
+    [[ "$segment_count" =~ ^(0|[1-9][0-9]*)$ ]] || die "Enter a whole number of additional wired adapters."
+    (( segment_count <= 32 )) || die "ENRA supports up to 32 additional wired network segments."
 
     for ((i = 1; i <= segment_count; i++)); do
-        printf '\nEthernet segment %s of %s\n' "$i" "$segment_count"
-        selected="$(choose_interface "Dedicated Ethernet interface for segment $i" yes)"
+        printf '\nAdditional wired network %s of %s\n' "$i" "$segment_count" >&2
+        selected="$(choose_interface "Select a dedicated wired adapter for this separate network." yes)"
         [[ "$selected" != "$UPLINK_IF" && "$selected" != "$WIFI_IF" ]] ||
             die "$selected is already assigned to another ENRA role."
         for existing in "${SEGMENT_IFACES[@]}"; do
@@ -755,16 +779,17 @@ configure_interfaces() {
         validate_routed_port "$selected"
 
         default_gateway="10.$((42 + i)).0.1"
-        read -r -p "Segment $i gateway IPv4 [$default_gateway]: " gateway
-        gateway="${gateway:-$default_gateway}"
-        read -r -p "Segment $i subnet prefix [24]: " prefix
-        prefix="${prefix:-24}"
-        read -r -p "Segment $i DHCP range start [10.$((42 + i)).0.50]: " start
-        start="${start:-10.$((42 + i)).0.50}"
-        read -r -p "Segment $i DHCP range end [10.$((42 + i)).0.200]: " end
-        end="${end:-10.$((42 + i)).0.200}"
-        network="$(validate_segment_network "$gateway" "$prefix" "$start" "$end" "$DNS_UPSTREAM" "${SEGMENT_NETWORKS[@]}")" ||
-            die "Invalid network settings for Ethernet segment $i."
+        gateway="$default_gateway"
+        prefix="24"
+        start="10.$((42 + i)).0.50"
+        end="10.$((42 + i)).0.200"
+        if ! network="$(validate_segment_network "$gateway" "$prefix" "$start" "$end" "$DNS_UPSTREAM" "${SEGMENT_NETWORKS[@]}" 2>/dev/null)"; then
+            network="$(next_segment_network)" || die "ENRA could not find an unused subnet for wired network $i."
+            gateway="${network%/*}"
+            gateway="${gateway%.*}.1"
+            start="${gateway%.*}.50"
+            end="${gateway%.*}.200"
+        fi
 
         SEGMENT_IFACES+=("$selected")
         SEGMENT_MACS+=("$(interface_mac "$selected" 2>/dev/null || true)")
@@ -774,6 +799,7 @@ configure_interfaces() {
         SEGMENT_NETWORKS+=("$network")
         SEGMENT_DHCP_STARTS+=("$start")
         SEGMENT_DHCP_ENDS+=("$end")
+        printf '  Assigned subnet: %s (gateway %s)\n' "$network" "$gateway" >&2
     done
 
     AP_GATEWAY="${SEGMENT_GATEWAYS[0]}"
@@ -783,10 +809,12 @@ configure_interfaces() {
     DHCP_END="${SEGMENT_DHCP_ENDS[0]}"
 
     if systemctl is-active --quiet dnsmasq.service; then
-        die "The system dnsmasq.service is active. Resolve that DNS/DHCP conflict before choosing routed mode."
+        die "The system dnsmasq.service is active. Stop and inspect that service before choosing a separate ENRA network."
     fi
     return 0
 }
+
+
 configure_radio() {
     local answer default_channel
     read -r -p "Regulatory country code (ISO alpha-2) [NL]: " COUNTRY_CODE
