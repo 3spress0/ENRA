@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly ENRA_VERSION="0.6.2"
+readonly ENRA_VERSION="0.7.0"
 readonly CONFIG_DIR="/etc/enra"
 readonly CONFIG_FILE="$CONFIG_DIR/enra.conf"
 readonly HOSTAPD_FILE="$CONFIG_DIR/hostapd.conf"
@@ -51,8 +51,17 @@ require_systemd() {
 
 load_config() {
     [[ -f "$CONFIG_FILE" ]] || die "ENRA is not configured. Run: sudo enra setup"
+    local config_migrated=no
     # shellcheck source=/etc/enra/enra.conf
     source "$CONFIG_FILE"
+    WIFI_MAC="${WIFI_MAC:-}"
+    UPLINK_MAC="${UPLINK_MAC:-}"
+    AUTO_DISCOVER_WIFI="${AUTO_DISCOVER_WIFI:-true}"
+    case "${AUTO_DISCOVER_WIFI,,}" in
+        true|yes|1|on) AUTO_DISCOVER_WIFI=true ;;
+        false|no|0|off) AUTO_DISCOVER_WIFI=false ;;
+        *) die "AUTO_DISCOVER_WIFI must be true or false." ;;
+    esac
     AUTO_UP_INTERFACES="${AUTO_UP_INTERFACES:-true}"
     AUTO_UP_EXCLUDE="${AUTO_UP_EXCLUDE:-}"
     AUTO_ADD_INTERFACES="${AUTO_ADD_INTERFACES:-true}"
@@ -72,6 +81,18 @@ load_config() {
         SEGMENT_NETWORKS=("$AP_NETWORK")
         SEGMENT_DHCP_STARTS=("$DHCP_START")
         SEGMENT_DHCP_ENDS=("$DHCP_END")
+    fi
+    if [[ "$NETWORK_MODE" == "routed" && -z "${SEGMENT_MACS+x}" ]]; then
+        SEGMENT_MACS=()
+        local segment_iface
+        for segment_iface in "${SEGMENT_IFACES[@]}"; do
+            SEGMENT_MACS+=("$(interface_mac "$segment_iface" 2>/dev/null || true)")
+        done
+        config_migrated=yes
+    fi
+    if [[ "$config_migrated" == "yes" ]]; then
+        save_main_config
+        log "Migrated routed segment adapter identities into the ENRA configuration."
     fi
 }
 detect_platform() {
@@ -160,6 +181,177 @@ supports_ap_mode() {
              found && !/^[[:space:]]/ {exit 1}
              END {if (!found) exit 1}'
 }
+
+interface_mac() {
+    local iface="$1"
+    [[ -r "/sys/class/net/$iface/address" ]] || return 1
+    tr '[:upper:]' '[:lower:]' < "/sys/class/net/$iface/address"
+}
+
+replace_interface_directive() {
+    local file="$1" old_iface="$2" new_iface="$3" directive="$4" temp mode
+    [[ -f "$file" && -n "$old_iface" && "$old_iface" != "$new_iface" ]] || return 0
+    temp="$(mktemp "${file}.XXXXXX")"
+    mode="$(stat -c '%a' "$file" 2>/dev/null || printf '600')"
+    awk -v prefix="${directive}=" -v old="$old_iface" -v new="$new_iface" '
+        $0 == prefix old { print prefix new; next }
+        { print }
+    ' "$file" > "$temp" || {
+        rm -f "$temp"
+        return 1
+    }
+    chmod "$mode" "$temp"
+    mv -f -- "$temp" "$file"
+}
+
+wireless_ap_interfaces() {
+    local iface
+    while IFS= read -r iface; do
+        [[ -n "$iface" ]] || continue
+        supports_ap_mode "$iface" && printf '%s\n' "$iface"
+    done < <(wireless_list)
+}
+
+resolve_wireless_interface() {
+    local old_iface="$WIFI_IF" iface candidate="" mac candidates count=0
+    if [[ -n "${DRIVER_MODULE:-}" ]]; then
+        modprobe "$DRIVER_MODULE" >/dev/null 2>&1 || warn "Could not load the configured Wi-Fi driver module: $DRIVER_MODULE"
+    fi
+    command -v rfkill >/dev/null 2>&1 && rfkill unblock wifi >/dev/null 2>&1 || true
+
+    if [[ -n "$WIFI_IF" ]] && iw dev "$WIFI_IF" info >/dev/null 2>&1 && supports_ap_mode "$WIFI_IF"; then
+        mac="$(interface_mac "$WIFI_IF" 2>/dev/null || true)"
+        if [[ -n "$mac" && ( "$mac" != "${WIFI_MAC:-}" || ( "$NETWORK_MODE" == "routed" && "$mac" != "${SEGMENT_MACS[0]:-}" ) ) ]]; then
+            [[ -z "${WIFI_MAC:-}" ]] || ENRA_INTERFACE_REBOUND=yes
+            WIFI_MAC="$mac"
+            if [[ "$NETWORK_MODE" == "routed" ]]; then
+                SEGMENT_MACS[0]="$mac"
+            fi
+            save_main_config
+            log "Saved Wi-Fi adapter identity: $WIFI_IF ($WIFI_MAC)."
+        fi
+        return 0
+    fi
+
+    if [[ -n "${WIFI_MAC:-}" ]]; then
+        while IFS= read -r iface; do
+            [[ -n "$iface" ]] || continue
+            supports_ap_mode "$iface" || continue
+            mac="$(interface_mac "$iface" 2>/dev/null || true)"
+            if [[ "$mac" == "$WIFI_MAC" ]]; then
+                candidate="$iface"
+                break
+            fi
+        done < <(wireless_list)
+    fi
+
+    if [[ -z "$candidate" ]]; then
+        case "${AUTO_DISCOVER_WIFI,,}" in
+            true|yes|1|on)
+                candidates="$(wireless_ap_interfaces)"
+                count="$(grep -c . <<< "$candidates" || true)"
+                if (( count == 1 )); then
+                    candidate="$candidates"
+                elif (( count > 1 )); then
+                    warn "Multiple AP-capable Wi-Fi interfaces were detected and the configured adapter is unavailable. Reconnect the configured adapter or run 'enra setup' to select one."
+                    return 1
+                fi
+                ;;
+            *)
+                warn "Automatic Wi-Fi adapter discovery is disabled."
+                return 1
+                ;;
+        esac
+    fi
+
+    if [[ -z "$candidate" ]]; then
+        warn "No AP-capable Wi-Fi adapter is currently available."
+        return 1
+    fi
+
+    WIFI_IF="$candidate"
+    WIFI_MAC="$(interface_mac "$candidate" 2>/dev/null || true)"
+    ENRA_INTERFACE_REBOUND=yes
+    if [[ "$NETWORK_MODE" == "routed" && "${SEGMENT_IFACES[0]:-}" == "$old_iface" ]]; then
+        SEGMENT_IFACES[0]="$candidate"
+        SEGMENT_MACS[0]="$WIFI_MAC"
+    fi
+
+    replace_interface_directive "$HOSTAPD_FILE" "$old_iface" "$candidate" interface
+    if [[ "$NETWORK_MODE" == "routed" ]]; then
+        replace_interface_directive "$DNSMASQ_FILE" "$old_iface" "$candidate" interface
+    fi
+    [[ -z "$old_iface" ]] || rm -f "/etc/systemd/network/00-enra-$old_iface.network"
+    save_main_config
+    configure_network_manager
+    configure_networkd_unmanaged
+    success "Bound ENRA to detected Wi-Fi adapter $WIFI_IF ($WIFI_MAC)."
+    return 0
+}
+
+resolve_uplink_interface() {
+    local old_iface="$UPLINK_IF" iface candidate="" mac iface_path
+    if [[ -n "$UPLINK_IF" ]] && ip link show dev "$UPLINK_IF" >/dev/null 2>&1; then
+        mac="$(interface_mac "$UPLINK_IF" 2>/dev/null || true)"
+        if [[ -n "$mac" && "$mac" != "${UPLINK_MAC:-}" ]]; then
+            [[ -z "${UPLINK_MAC:-}" ]] || ENRA_INTERFACE_REBOUND=yes
+            UPLINK_MAC="$mac"
+            save_main_config
+            log "Saved upstream adapter identity: $UPLINK_IF ($UPLINK_MAC)."
+        fi
+        return 0
+    fi
+
+    [[ -n "${UPLINK_MAC:-}" ]] || {
+        warn "Configured upstream interface $UPLINK_IF is missing and has no saved MAC identity. Run 'enra setup' to select its replacement."
+        return 1
+    }
+
+    for iface_path in /sys/class/net/*; do
+        [[ -d "$iface_path" ]] || continue
+        iface="${iface_path##*/}"
+        [[ "$iface" != "lo" ]] || continue
+        [[ "$(cat "$iface_path/type" 2>/dev/null || echo 0)" == "1" ]] || continue
+        [[ -d "$iface_path/device" ]] || continue
+        [[ ! -d "$iface_path/phy80211" ]] || continue
+        mac="$(interface_mac "$iface" 2>/dev/null || true)"
+        if [[ "$mac" == "$UPLINK_MAC" ]]; then
+            candidate="$iface"
+            break
+        fi
+    done
+
+    if [[ -z "$candidate" ]]; then
+        warn "The configured upstream adapter ($UPLINK_MAC) is not currently present."
+        return 1
+    fi
+
+    UPLINK_IF="$candidate"
+    ENRA_INTERFACE_REBOUND=yes
+    [[ -z "$old_iface" ]] || rm -f "/etc/systemd/network/00-enra-$old_iface.network"
+    save_main_config
+    configure_network_manager
+    configure_networkd_unmanaged
+    success "Rebound ENRA upstream to adapter $UPLINK_IF ($UPLINK_MAC)."
+    return 0
+}
+
+resolve_configured_interfaces() {
+    local wifi_ready=yes uplink_ready=yes
+    resolve_wireless_interface || wifi_ready=no
+    resolve_uplink_interface || uplink_ready=no
+
+    [[ "$wifi_ready" == "yes" ]] || return 1
+    if [[ "$uplink_ready" != "yes" ]]; then
+        if [[ "$NETWORK_MODE" == "bridge" ]]; then
+            warn "Bridge mode is degraded: Wi-Fi remains available, but its Ethernet uplink is disconnected."
+        else
+            warn "Routed mode is degraded: local Wi-Fi remains available, but the upstream interface is unavailable."
+        fi
+    fi
+    return 0
+}
+
 
 install_rtl8821au_firmware() {
     log "Checking firmware package for RTL8821AU."
@@ -252,7 +444,8 @@ choose_wireless_interface() {
         grep -Fxq "$WIFI_IF" <<< "$choices" || die "That interface was not detected."
     fi
     supports_ap_mode "$WIFI_IF" || die "$WIFI_IF does not advertise AP mode. Use an adapter/driver with AP-mode support."
-    success "Access-point interface: $WIFI_IF"
+    WIFI_MAC="$(interface_mac "$WIFI_IF" 2>/dev/null || true)"
+    success "Access-point interface: $WIFI_IF (${WIFI_MAC:-MAC unavailable})"
 }
 
 choose_network_mode() {
@@ -373,6 +566,7 @@ configure_interfaces() {
     local segment_count selected i default_gateway gateway prefix start end network existing
     if [[ "$NETWORK_MODE" == "bridge" ]]; then
         UPLINK_IF="$(choose_interface "Interface connected to the LAN being bridged" yes)"
+        UPLINK_MAC="$(interface_mac "$UPLINK_IF" 2>/dev/null || true)"
         [[ "$UPLINK_IF" != "$WIFI_IF" ]] || die "Wired and wireless interfaces must be different."
         validate_bridge_port "$UPLINK_IF"
         AP_GATEWAY="" AP_PREFIX="" AP_NETWORK="" DHCP_START="" DHCP_END="" DNS_UPSTREAM=""
@@ -382,6 +576,7 @@ configure_interfaces() {
     fi
 
     UPLINK_IF="$(choose_interface "Internet/upstream interface" no)"
+    UPLINK_MAC="$(interface_mac "$UPLINK_IF" 2>/dev/null || true)"
     [[ "$UPLINK_IF" != "$WIFI_IF" ]] || die "AP and uplink interfaces must be different."
 
     DNS_UPSTREAM=""
@@ -389,6 +584,7 @@ configure_interfaces() {
     DNS_UPSTREAM="${DNS_UPSTREAM:-1.1.1.1}"
 
     SEGMENT_IFACES=("$WIFI_IF")
+    SEGMENT_MACS=("$WIFI_MAC")
     SEGMENT_NAMES=("Wi-Fi")
     SEGMENT_GATEWAYS=()
     SEGMENT_PREFIXES=()
@@ -441,6 +637,7 @@ configure_interfaces() {
             die "Invalid network settings for Ethernet segment $i."
 
         SEGMENT_IFACES+=("$selected")
+        SEGMENT_MACS+=("$(interface_mac "$selected" 2>/dev/null || true)")
         SEGMENT_NAMES+=("Ethernet $i")
         SEGMENT_GATEWAYS+=("$gateway")
         SEGMENT_PREFIXES+=("$prefix")
@@ -518,8 +715,9 @@ save_main_config() {
     chmod 700 "$CONFIG_DIR"
     config_tmp="$(mktemp "$CONFIG_DIR/.enra.conf.XXXXXX")"
     {
-        printf 'NETWORK_MODE=%q\nWIFI_IF=%q\nUPLINK_IF=%q\nSSID=%q\nSSID_HEX=%q\n' \
-            "$NETWORK_MODE" "$WIFI_IF" "$UPLINK_IF" "$SSID" "$SSID_HEX"
+        printf 'NETWORK_MODE=%q\nWIFI_IF=%q\nWIFI_MAC=%q\nUPLINK_IF=%q\nUPLINK_MAC=%q\nSSID=%q\nSSID_HEX=%q\n' \
+            "$NETWORK_MODE" "$WIFI_IF" "${WIFI_MAC:-}" "$UPLINK_IF" "${UPLINK_MAC:-}" "$SSID" "$SSID_HEX"
+        printf 'AUTO_DISCOVER_WIFI=%q\n' "${AUTO_DISCOVER_WIFI:-true}"
         printf 'COUNTRY_CODE=%q\nBAND=%q\nCHANNEL=%q\nSECURITY=%q\n' "$COUNTRY_CODE" "$BAND" "$CHANNEL" "$SECURITY"
         printf 'AP_GATEWAY=%q\nAP_PREFIX=%q\nAP_NETWORK=%q\n' "$AP_GATEWAY" "$AP_PREFIX" "$AP_NETWORK"
         printf 'DHCP_START=%q\nDHCP_END=%q\nDNS_UPSTREAM=%q\nDRIVER_MODULE=%q\n' \
@@ -529,6 +727,7 @@ save_main_config() {
         printf 'ALLOW_INTER_SEGMENT_TRAFFIC=%q\n' "${ALLOW_INTER_SEGMENT_TRAFFIC:-false}"
         if [[ "$NETWORK_MODE" == "routed" ]]; then
             write_config_array SEGMENT_IFACES "${SEGMENT_IFACES[@]}"
+            write_config_array SEGMENT_MACS "${SEGMENT_MACS[@]}"
             write_config_array SEGMENT_NAMES "${SEGMENT_NAMES[@]}"
             write_config_array SEGMENT_GATEWAYS "${SEGMENT_GATEWAYS[@]}"
             write_config_array SEGMENT_PREFIXES "${SEGMENT_PREFIXES[@]}"
@@ -682,7 +881,7 @@ EOF
     cat > /etc/systemd/system/enra-hotplug-scan.service <<'EOF'
 [Unit]
 Description=ENRA scan for unassigned Ethernet interfaces
-Requires=enra-network.service enra-ap.service
+Wants=enra-network.service enra-ap.service
 After=enra-network.service enra-ap.service enra-dnsmasq.service
 
 [Service]
@@ -699,6 +898,21 @@ EOF
 ACTION=="add", SUBSYSTEM=="net", KERNEL!="lo", TAG+="systemd", ENV{SYSTEMD_WANTS}+="enra-hotplug@%k.service"
 EOF
     udevadm control --reload-rules 2>/dev/null || true
+    cat > /etc/systemd/system/enra-link-monitor.service <<'EOF'
+[Unit]
+Description=ENRA monitor for network adapter and carrier changes
+Wants=network-pre.target
+After=network-pre.target systemd-udevd.service enra-devices.service enra-network.service enra-ap.service enra-dnsmasq.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/enra monitor-links
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
     cat > /etc/systemd/system/enra-network.service <<'EOF'
 [Unit]
 Description=ENRA network configuration
@@ -720,7 +934,7 @@ EOF
     cat > /etc/systemd/system/enra-ap.service <<EOF
 [Unit]
 Description=ENRA wireless access point
-Requires=enra-network.service
+Wants=enra-network.service
 After=enra-network.service
 
 [Service]
@@ -739,7 +953,7 @@ EOF
         cat > /etc/systemd/system/enra-dnsmasq.service <<EOF
 [Unit]
 Description=ENRA DHCP and DNS service
-Requires=enra-network.service enra-ap.service
+Wants=enra-network.service enra-ap.service
 After=enra-network.service enra-ap.service
 
 [Service]
@@ -809,13 +1023,13 @@ setup() {
     install_services
     # Only ENRA-owned units are managed here. Debian may intentionally mask
     # the vendor hostapd.service; ENRA runs hostapd directly via enra-ap.service.
-    systemctl unmask enra-devices.service enra-network.service enra-ap.service enra-hotplug-scan.service
+    systemctl unmask enra-devices.service enra-network.service enra-ap.service enra-hotplug-scan.service enra-link-monitor.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         systemctl unmask enra-dnsmasq.service
     fi
     systemctl daemon-reload
     log "Enabling ENRA services..."
-    systemctl enable enra-devices.service enra-network.service enra-ap.service enra-hotplug-scan.service
+    systemctl enable enra-devices.service enra-network.service enra-ap.service enra-hotplug-scan.service enra-link-monitor.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         systemctl enable enra-dnsmasq.service
     else
@@ -839,6 +1053,9 @@ setup() {
     else
         systemctl disable enra-dnsmasq.service >/dev/null 2>&1 || true
     fi
+    mkdir -p /run/enra
+    touch /run/enra/wifi-ready
+    systemctl start enra-link-monitor.service || warn "ENRA link monitor could not start; manual service recovery will still work."
     log "Scanning for additional Ethernet interfaces..."
     systemctl restart enra-hotplug-scan.service ||
         warn "Automatic NIC scan failed. Inspect journalctl -u enra-hotplug-scan.service."
@@ -963,35 +1180,11 @@ interface_is_excluded() {
     return 1
 }
 
-recover_required_interface() {
-    local iface="$1"
-    [[ "$iface" == "$WIFI_IF" || "$iface" == "$UPLINK_IF" ]] || return 1
-    if ! configured_interfaces_ready; then
-        log "Required interface $iface appeared, but another required ENRA interface is still missing."
-        return 0
-    fi
-
-    log "All required ENRA interfaces are available. Recovering network services."
-    ip link set dev "$iface" up || {
-        warn "Could not bring newly detected interface $iface up; recovery will be retried on the next device event."
-        return 0
-    }
-    systemctl start enra-devices.service
-    systemctl reset-failed enra-network.service enra-ap.service enra-dnsmasq.service enra-hotplug-scan.service 2>/dev/null || true
-    systemctl start enra-network.service
-    systemctl start enra-ap.service
-    if [[ "$NETWORK_MODE" == "routed" ]]; then
-        systemctl start enra-dnsmasq.service
-    fi
-    systemctl start enra-hotplug-scan.service || warn "Network recovered, but the automatic NIC scan failed."
-    success "ENRA services recovered after interface $iface appeared."
-}
-
 hotplug_add() (
     require_root hotplug-add
     require_systemd
     [[ "$#" -eq 1 ]] || die "Usage: sudo enra hotplug-add <interface>"
-    local iface="$1" path index gateway prefix network dhcp_start dhcp_end
+    local iface="$1" path index gateway prefix network dhcp_start dhcp_end mac old_iface
     local config_backup dnsmasq_backup
 
     install -d -m 0755 /run/lock
@@ -999,8 +1192,12 @@ hotplug_add() (
     flock -w 60 9 || die "Timed out waiting for another ENRA interface update."
 
     load_config
+    if ! systemctl is-active --quiet enra-link-monitor.service; then
+        log "ENRA is stopped; ignoring automatic interface event."
+        return 0
+    fi
     if [[ "$iface" == "$WIFI_IF" || "$iface" == "$UPLINK_IF" ]]; then
-        recover_required_interface "$iface"
+        log "Core interface event received for $iface; the link monitor will reconcile service state."
         return 0
     fi
     if ! systemctl is-active --quiet enra-network.service; then
@@ -1027,6 +1224,48 @@ hotplug_add() (
     if iw dev 2>/dev/null | awk '$1 == "Interface" {print $2}' | grep -Fxq "$iface"; then
         return 0
     fi
+
+    mac="$(interface_mac "$iface" 2>/dev/null || true)"
+    for ((index = 1; index < ${#SEGMENT_IFACES[@]}; index++)); do
+        old_iface="${SEGMENT_IFACES[$index]}"
+        if [[ "$old_iface" != "$iface" && ! -d "/sys/class/net/$old_iface" && -n "$mac" && "$mac" == "${SEGMENT_MACS[$index]:-}" ]]; then
+            log "Restoring saved Ethernet segment ${SEGMENT_NAMES[$index]} on reconnected adapter $iface."
+            config_backup="$(mktemp "$CONFIG_DIR/.enra.conf.backup.XXXXXX")"
+            dnsmasq_backup="$(mktemp "$CONFIG_DIR/.dnsmasq.conf.backup.XXXXXX")"
+            cp -a "$CONFIG_FILE" "$config_backup"
+            cp -a "$DNSMASQ_FILE" "$dnsmasq_backup"
+            SEGMENT_IFACES[$index]="$iface"
+            SEGMENT_MACS[$index]="$mac"
+
+            if ! save_main_config || ! write_dnsmasq_config || ! ip link set dev "$iface" up; then
+                cp -a "$config_backup" "$CONFIG_FILE"
+                cp -a "$dnsmasq_backup" "$DNSMASQ_FILE"
+                rm -f "$config_backup" "$dnsmasq_backup"
+                die "Could not restore saved segment $old_iface on $iface. Previous configuration restored."
+            fi
+
+            rm -f "/etc/systemd/network/00-enra-$old_iface.network"
+            configure_network_manager
+            configure_networkd_unmanaged
+            if ! systemctl restart enra-network.service || ! systemctl restart enra-dnsmasq.service; then
+                warn "Applying the restored Ethernet segment failed. Rolling back."
+                cp -a "$config_backup" "$CONFIG_FILE"
+                cp -a "$dnsmasq_backup" "$DNSMASQ_FILE"
+                load_config
+                configure_network_manager
+                configure_networkd_unmanaged
+                systemctl restart enra-network.service || warn "Network rollback failed; inspect ENRA logs."
+                systemctl restart enra-dnsmasq.service || warn "DHCP/DNS rollback failed; inspect ENRA logs."
+                rm -f "$config_backup" "$dnsmasq_backup"
+                die "Could not restore saved segment on $iface. Previous configuration restored."
+            fi
+
+            rm -f "$config_backup" "$dnsmasq_backup"
+            success "Restored ${SEGMENT_NAMES[$index]} on $iface using its saved subnet ${SEGMENT_NETWORKS[$index]}."
+            return 0
+        fi
+    done
+
     if interface_is_excluded "$iface"; then
         log "Skipping excluded interface: $iface"
         return 0
@@ -1034,6 +1273,10 @@ hotplug_add() (
 
     for ((index = 0; index < ${#SEGMENT_IFACES[@]}; index++)); do
         if [[ "$iface" == "${SEGMENT_IFACES[$index]}" ]]; then
+            if [[ -n "$mac" && "$mac" != "${SEGMENT_MACS[$index]:-}" ]]; then
+                SEGMENT_MACS[$index]="$mac"
+                save_main_config
+            fi
             if ip -4 -o address show dev "$iface" 2>/dev/null |
                 awk '{print $4}' | grep -Fxq "${SEGMENT_GATEWAYS[$index]}/${SEGMENT_PREFIXES[$index]}"; then
                 return 0
@@ -1078,6 +1321,7 @@ hotplug_add() (
     dhcp_end="${network%.*}.200"
     index="${#SEGMENT_IFACES[@]}"
     SEGMENT_IFACES+=("$iface")
+    SEGMENT_MACS+=("$(interface_mac "$iface" 2>/dev/null || true)")
     SEGMENT_NAMES+=("Ethernet $index")
     SEGMENT_GATEWAYS+=("$gateway")
     SEGMENT_PREFIXES+=("$prefix")
@@ -1150,14 +1394,7 @@ scan_new_interfaces() {
 }
 
 configured_interfaces_ready() {
-    local iface ready=yes
-    for iface in "$WIFI_IF" "$UPLINK_IF"; do
-        if [[ -z "$iface" ]] || ! ip link show dev "$iface" >/dev/null 2>&1; then
-            warn "Required ENRA interface is unavailable: ${iface:-unset}."
-            ready=no
-        fi
-    done
-    [[ "$ready" == "yes" ]]
+    resolve_configured_interfaces
 }
 
 preflight() {
@@ -1165,6 +1402,107 @@ preflight() {
     load_config
     configured_interfaces_ready || return 1
 }
+
+reconcile() (
+    require_root reconcile
+    require_systemd
+    [[ -r "$CONFIG_FILE" ]] || return 0
+
+    install -d -m 0755 /run/lock
+    exec 8>/run/lock/enra-reconcile.lock
+    flock -n 8 || return 0
+
+    load_config
+    ENRA_INTERFACE_REBOUND=no
+    if ! configured_interfaces_ready; then
+        rm -f /run/enra/wifi-ready
+        warn "ENRA is degraded: required wireless hardware is unavailable (or the bridge uplink is missing). Stopping only dependent ENRA services."
+        systemctl stop enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
+        return 0
+    fi
+
+    if [[ "$NETWORK_MODE" == "bridge" ]] && ip link show dev "$UPLINK_IF" >/dev/null 2>&1; then
+        if [[ ! -d "/sys/class/net/$BRIDGE_IF/bridge" || ! -L "/sys/class/net/$UPLINK_IF/master" ]]; then
+            ENRA_INTERFACE_REBOUND=yes
+            log "Bridge uplink $UPLINK_IF is not attached to $BRIDGE_IF; scheduling bridge recovery."
+        fi
+    fi
+
+    local restart_stack=no
+    if [[ ! -f /run/enra/wifi-ready || "$ENRA_INTERFACE_REBOUND" == "yes" ]]; then
+        restart_stack=yes
+    fi
+
+    systemctl start enra-devices.service || warn "Could not start ENRA device bring-up service."
+    ip link set dev "$WIFI_IF" up || {
+        rm -f /run/enra/wifi-ready
+        warn "Could not bring Wi-Fi interface $WIFI_IF up. Waiting for the next device event."
+        return 0
+    }
+
+    systemctl reset-failed enra-network.service enra-ap.service enra-dnsmasq.service enra-hotplug-scan.service 2>/dev/null || true
+    if [[ "$restart_stack" == "yes" ]] && systemctl is-active --quiet enra-network.service; then
+        systemctl restart enra-network.service || {
+            rm -f /run/enra/wifi-ready
+            warn "ENRA network configuration could not restart after an adapter change. Inspect 'enra logs'."
+            return 0
+        }
+    elif ! systemctl is-active --quiet enra-network.service; then
+        systemctl start enra-network.service || {
+            rm -f /run/enra/wifi-ready
+            warn "ENRA network configuration could not start. Inspect 'enra logs'."
+            return 0
+        }
+    fi
+    if [[ "$restart_stack" == "yes" ]] && systemctl is-active --quiet enra-ap.service; then
+        systemctl restart enra-ap.service || {
+            rm -f /run/enra/wifi-ready
+            warn "ENRA access point could not restart after an adapter change. Inspect 'enra logs'."
+            return 0
+        }
+    elif ! systemctl is-active --quiet enra-ap.service; then
+        systemctl start enra-ap.service || {
+            rm -f /run/enra/wifi-ready
+            warn "ENRA access point could not start. Inspect 'enra logs'."
+            return 0
+        }
+    fi
+    if [[ "$NETWORK_MODE" == "routed" ]]; then
+        if [[ "$restart_stack" == "yes" ]] && systemctl is-active --quiet enra-dnsmasq.service; then
+            systemctl restart enra-dnsmasq.service || warn "ENRA DHCP/DNS could not restart after an adapter change."
+        elif ! systemctl is-active --quiet enra-dnsmasq.service; then
+            systemctl start enra-dnsmasq.service || warn "ENRA DHCP/DNS could not start. Inspect 'enra logs'."
+        fi
+    fi
+    mkdir -p /run/enra
+    touch /run/enra/wifi-ready
+    if ! systemctl is-active --quiet enra-hotplug-scan.service; then
+        systemctl start enra-hotplug-scan.service || warn "ENRA NIC integration scan could not start."
+    fi
+
+    if [[ -n "$UPLINK_IF" && ! -r "/sys/class/net/$UPLINK_IF/carrier" ]]; then
+        warn "Upstream interface $UPLINK_IF has no readable carrier state."
+    elif [[ -n "$UPLINK_IF" && "$(cat "/sys/class/net/$UPLINK_IF/carrier" 2>/dev/null || echo 0)" != "1" ]]; then
+        warn "Upstream Ethernet link is down. ENRA remains available locally and will use the uplink when carrier returns."
+    fi
+)
+
+monitor_links() {
+    require_root monitor-links
+    require_systemd
+    command -v ip >/dev/null 2>&1 || die "iproute2 is required for link monitoring."
+    log "Monitoring Linux link events for adapter hotplug and Ethernet carrier changes."
+    while true; do
+        ip monitor link 2>/dev/null | while IFS= read -r event; do
+            [[ -n "$event" ]] || continue
+            sleep 1
+            "$INSTALLED_SCRIPT" reconcile || warn "ENRA reconciliation failed after a network link event."
+        done
+        warn "The kernel link-event monitor stopped. Reconnecting in two seconds."
+        sleep 2
+    done
+}
+
 
 check_missing_segments() {
     [[ "$NETWORK_MODE" == "routed" ]] || return 0
@@ -1188,17 +1526,20 @@ network_up() {
     check_missing_segments
     if [[ "$NETWORK_MODE" == "bridge" ]]; then
         ip link show dev "$WIFI_IF" >/dev/null 2>&1 || die "Wireless interface not found: $WIFI_IF"
-        ip link show dev "$UPLINK_IF" >/dev/null 2>&1 || die "Bridge uplink not found: $UPLINK_IF"
         ip link set dev "$WIFI_IF" up
         [[ -d "/sys/class/net/$BRIDGE_IF/bridge" ]] || ip link add name "$BRIDGE_IF" type bridge stp_state 0
-        if [[ -L "/sys/class/net/$UPLINK_IF/master" ]]; then
-            local master
-            master="$(basename "$(readlink -f "/sys/class/net/$UPLINK_IF/master")")"
-            [[ "$master" == "$BRIDGE_IF" ]] || die "$UPLINK_IF is already attached to $master."
+        if ip link show dev "$UPLINK_IF" >/dev/null 2>&1; then
+            if [[ -L "/sys/class/net/$UPLINK_IF/master" ]]; then
+                local master
+                master="$(basename "$(readlink -f "/sys/class/net/$UPLINK_IF/master")")"
+                [[ "$master" == "$BRIDGE_IF" ]] || die "$UPLINK_IF is already attached to $master."
+            else
+                ip link set dev "$UPLINK_IF" master "$BRIDGE_IF"
+            fi
+            ip link set dev "$UPLINK_IF" up
         else
-            ip link set dev "$UPLINK_IF" master "$BRIDGE_IF"
+            warn "Bridge Ethernet uplink $UPLINK_IF is absent. Keeping the Wi-Fi access point and bridge running without its wired backhaul."
         fi
-        ip link set dev "$UPLINK_IF" up
         ip link set dev "$BRIDGE_IF" up
         return 0
     fi
@@ -1333,6 +1674,7 @@ status() {
 
     printf 'ENRA-managed services (active state and boot setting):\n'
     service_report "Device bring-up" enra-devices.service
+    service_report "Link monitor" enra-link-monitor.service
     service_report "NIC integration scan" enra-hotplug-scan.service
     service_report "Network" enra-network.service
     service_report "Access point (hostapd)" enra-ap.service
@@ -1342,15 +1684,26 @@ status() {
 
     printf '\nConfigured interface availability:\n'
     for iface in "$WIFI_IF" "$UPLINK_IF"; do
-        if ip link show dev "$iface" >/dev/null 2>&1; then
-            printf '  [PRESENT] %s\n' "$iface"
+        if [[ -z "$iface" ]] || ! ip link show dev "$iface" >/dev/null 2>&1; then
+            printf '  [MISSING] %s\n' "${iface:-unset}"
+            continue
+        fi
+        local operstate carrier
+        operstate="$(cat "/sys/class/net/$iface/operstate" 2>/dev/null || printf 'unknown')"
+        carrier="$(cat "/sys/class/net/$iface/carrier" 2>/dev/null || printf 'unknown')"
+        if [[ "$iface" == "$WIFI_IF" ]]; then
+            printf '  [PRESENT] %s (wireless, state: %s)\n' "$iface" "$operstate"
+        elif [[ "$carrier" == "1" ]]; then
+            printf '  [PRESENT] %s (Ethernet carrier: connected, state: %s)\n' "$iface" "$operstate"
+        elif [[ "$carrier" == "0" ]]; then
+            printf '  [PRESENT] %s (Ethernet carrier: disconnected; cable unplugged)\n' "$iface"
         else
-            printf '  [MISSING] %s\n' "$iface"
+            printf '  [PRESENT] %s (Ethernet carrier: %s, state: %s)\n' "$iface" "$carrier" "$operstate"
         fi
     done
     printf '\nNetwork addresses:\n'; ip -br addr || true
     printf '\nWireless interface state:\n'; iw dev || true
-    printf '\nENRA logs:\n'; journalctl -u enra-network.service -u enra-ap.service -u enra-dnsmasq.service -n 30 --no-pager || true
+    printf '\nENRA logs:\n'; journalctl -u enra-link-monitor.service -u enra-network.service -u enra-ap.service -u enra-dnsmasq.service -n 30 --no-pager || true
 
     printf '\nNote: ENRA uses its own enra-ap.service and (in routed mode) enra-dnsmasq.service.\n'
     printf 'The distribution units hostapd.service and dnsmasq.service are not used by ENRA.\n'
@@ -1365,7 +1718,7 @@ validate_check() {
 
 validate_service() {
     local label="$1" unit="$2" active enabled
-    if [[ "${ENRA_RUNTIME_READY:-yes}" != "yes" && "$unit" != "enra-devices.service" ]]; then
+    if [[ "${ENRA_RUNTIME_READY:-yes}" != "yes" && "$unit" != "enra-devices.service" && "$unit" != "enra-link-monitor.service" ]]; then
         validate_check warn "$label service state is not evaluated until required interfaces return."
         return
     fi
@@ -1441,8 +1794,13 @@ validate() {
 
     if [[ -n "$UPLINK_IF" ]] && ip link show dev "$UPLINK_IF" >/dev/null 2>&1; then
         validate_check pass "Upstream interface exists: $UPLINK_IF."
+        if [[ -r "/sys/class/net/$UPLINK_IF/carrier" && "$(cat "/sys/class/net/$UPLINK_IF/carrier" 2>/dev/null || echo 0)" != "1" ]]; then
+            validate_check warn "Upstream Ethernet cable is disconnected; local ENRA services can remain active."
+        fi
+    elif [[ "$NETWORK_MODE" == "routed" ]]; then
+        validate_check warn "Upstream interface is currently absent: ${UPLINK_IF:-unset}. Routed clients will have no upstream access until it returns."
     else
-        validate_check fail "Upstream interface is missing: ${UPLINK_IF:-unset}."
+        validate_check warn "Bridge uplink interface is missing: ${UPLINK_IF:-unset}. The Wi-Fi access point remains available without wired backhaul."
     fi
 
     [[ -s "$HOSTAPD_FILE" ]] &&
@@ -1460,6 +1818,7 @@ validate() {
 
         local segment_arrays_valid=yes array_length
         for array_length in \
+            "${#SEGMENT_MACS[@]}" \
             "${#SEGMENT_NAMES[@]}" \
             "${#SEGMENT_GATEWAYS[@]}" \
             "${#SEGMENT_PREFIXES[@]}" \
@@ -1543,7 +1902,7 @@ validate() {
         fi
     elif [[ "$NETWORK_MODE" == "bridge" ]]; then
         if [[ "$ENRA_RUNTIME_READY" != "yes" ]]; then
-            validate_check warn "Bridge state is not evaluated until required interfaces return."
+            validate_check warn "Bridge state is not evaluated until the Wi-Fi adapter returns."
         elif ip link show dev "$BRIDGE_IF" >/dev/null 2>&1; then
             validate_check pass "ENRA bridge exists: $BRIDGE_IF."
         else
@@ -1553,6 +1912,7 @@ validate() {
 
     printf '\nENRA-managed services:\n'
     validate_service "Device bring-up" enra-devices.service
+    validate_service "Link monitor" enra-link-monitor.service
     validate_service "NIC integration scan" enra-hotplug-scan.service
     validate_service "Network" enra-network.service
     validate_service "Access point" enra-ap.service
@@ -1569,7 +1929,7 @@ validate() {
     printf 'Run "enra logs" for ENRA service logs.\n'
     return 1
 }
-logs() { journalctl -u enra-devices.service -u enra-hotplug-scan.service -u enra-network.service -u enra-ap.service -u enra-dnsmasq.service -n 120 --no-pager; }
+logs() { journalctl -u enra-link-monitor.service -u enra-devices.service -u enra-hotplug-scan.service -u enra-network.service -u enra-ap.service -u enra-dnsmasq.service -n 120 --no-pager; }
 start() {
     require_root start
     require_systemd
@@ -1578,17 +1938,13 @@ start() {
     systemctl daemon-reload
     udevadm control --reload-rules 2>/dev/null || true
     systemctl start enra-devices.service
-    if ! configured_interfaces_ready; then
-        warn "ENRA startup is deferred. Connect the configured Wi-Fi adapter and upstream NIC; ENRA will retry when either device appears."
-        return 0
-    fi
-    systemctl start enra-network.service enra-ap.service
-    [[ "$NETWORK_MODE" != "routed" ]] || systemctl start enra-dnsmasq.service
-    systemctl start enra-hotplug-scan.service
+    systemctl start enra-link-monitor.service
+    reconcile
 }
 stop() {
     require_root stop
-    systemctl stop 'enra-hotplug@*.service' enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
+    systemctl stop enra-link-monitor.service 'enra-hotplug@*.service' enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
+    rm -f /run/enra/wifi-ready
 }
 remove_segment() {
     require_root remove-segment
@@ -1625,6 +1981,7 @@ remove_segment() {
     expected_address="${SEGMENT_GATEWAYS[$index]}/${SEGMENT_PREFIXES[$index]}"
 
     SEGMENT_IFACES=("${SEGMENT_IFACES[@]:0:index}" "${SEGMENT_IFACES[@]:$((index + 1))}")
+    SEGMENT_MACS=("${SEGMENT_MACS[@]:0:index}" "${SEGMENT_MACS[@]:$((index + 1))}")
     SEGMENT_NAMES=("${SEGMENT_NAMES[@]:0:index}" "${SEGMENT_NAMES[@]:$((index + 1))}")
     SEGMENT_GATEWAYS=("${SEGMENT_GATEWAYS[@]:0:index}" "${SEGMENT_GATEWAYS[@]:$((index + 1))}")
     SEGMENT_PREFIXES=("${SEGMENT_PREFIXES[@]:0:index}" "${SEGMENT_PREFIXES[@]:$((index + 1))}")
@@ -1696,7 +2053,7 @@ remove_segment() {
 disable_services() {
     local -a units=()
     local unit
-    for unit in enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service enra-devices.service; do
+    for unit in enra-link-monitor.service enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service enra-devices.service; do
         if systemctl cat "$unit" >/dev/null 2>&1; then
             units+=("$unit")
         fi
@@ -1704,6 +2061,7 @@ disable_services() {
     rm -f /etc/udev/rules.d/90-enra-hotplug.rules
     udevadm control --reload-rules 2>/dev/null || true
     systemctl stop 'enra-hotplug@*.service' "${units[@]}" 2>/dev/null || true
+    rm -f /run/enra/wifi-ready
     if (("${#units[@]}" > 0)); then
         systemctl disable "${units[@]}" >/dev/null || true
     fi
@@ -1742,7 +2100,8 @@ uninstall() {
         /etc/systemd/system/enra-hotplug-scan.service \
         /etc/systemd/system/enra-network.service \
         /etc/systemd/system/enra-ap.service \
-        /etc/systemd/system/enra-dnsmasq.service
+        /etc/systemd/system/enra-dnsmasq.service \
+        /etc/systemd/system/enra-link-monitor.service
     rm -f /etc/NetworkManager/conf.d/90-enra-unmanaged.conf
     rm -f /etc/systemd/network/00-enra-*.network
     rm -rf "$CONFIG_DIR" /run/enra
@@ -1814,12 +2173,12 @@ refresh() {
     fi
 
     install_services
-    systemctl unmask enra-devices.service enra-network.service enra-ap.service enra-hotplug-scan.service
+    systemctl unmask enra-devices.service enra-network.service enra-ap.service enra-hotplug-scan.service enra-link-monitor.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         systemctl unmask enra-dnsmasq.service
     fi
     systemctl daemon-reload
-    systemctl enable enra-devices.service enra-network.service enra-ap.service enra-hotplug-scan.service
+    systemctl enable enra-devices.service enra-network.service enra-ap.service enra-hotplug-scan.service enra-link-monitor.service
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         systemctl enable enra-dnsmasq.service
     else
@@ -1827,9 +2186,11 @@ refresh() {
     fi
     systemctl restart enra-devices.service
     if ! configured_interfaces_ready; then
+        rm -f /run/enra/wifi-ready
         systemctl stop enra-hotplug-scan.service enra-dnsmasq.service enra-ap.service enra-network.service 2>/dev/null || true
-        warn "ENRA files and systemd units were updated, but networking was not started because a configured Wi-Fi or upstream interface is missing."
-        warn "Connect the missing hardware or restore VM USB/network passthrough. ENRA will retry when the interface appears."
+        warn "ENRA files and systemd units were updated, but networking is waiting for the Wi-Fi adapter."
+        warn "Connect the adapter or restore VM USB/network passthrough. The link monitor will start ENRA automatically when it appears."
+        systemctl start enra-link-monitor.service
         return 0
     fi
     systemctl restart enra-network.service
@@ -1837,6 +2198,9 @@ refresh() {
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         systemctl restart enra-dnsmasq.service
     fi
+    mkdir -p /run/enra
+    touch /run/enra/wifi-ready
+    systemctl start enra-link-monitor.service
     systemctl restart enra-hotplug-scan.service ||
         warn "Automatic NIC scan failed. Inspect journalctl -u enra-hotplug-scan.service."
     success "ENRA service definitions refreshed and services restarted."
@@ -1855,6 +2219,7 @@ Usage:
   sudo enra status      Show configuration and service health
   sudo enra /validate   Check configuration, interfaces, firewall and services
   sudo enra preflight   Check whether required interfaces are available
+  sudo enra reconcile   Reconcile ENRA services with currently connected hardware
   sudo enra /config     Edit the main ENRA configuration
   sudo enra /config show  Print the main ENRA configuration
   sudo enra update      Download and install the latest GitHub version
@@ -1867,6 +2232,9 @@ Usage:
   sudo enra logs        Show ENRA service logs
 
 Automatic interfaces:
+  ENRA monitors adapter hotplug and Ethernet carrier changes automatically.
+  WIFI_MAC and UPLINK_MAC identify adapters across interface renames.
+  Set AUTO_DISCOVER_WIFI=false to require the originally selected Wi-Fi adapter.
   ENRA brings up detected hardware-backed network interfaces at boot.
   Set AUTO_UP_INTERFACES=false in /etc/enra/enra.conf to disable link bring-up.
   Set AUTO_ADD_INTERFACES=false to disable automatic routed NIC integration.
@@ -1895,6 +2263,8 @@ case "$ACTION" in
     setup) setup ;;
     status) status ;;
     preflight) preflight ;;
+    reconcile) reconcile ;;
+    monitor-links) monitor_links ;;
     validate|/validate) validate ;;
     config|/config) config "${@:2}" ;;
     update) update ;;
