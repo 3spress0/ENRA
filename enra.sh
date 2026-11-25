@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly ENRA_VERSION="0.6.2"
+readonly ENRA_VERSION="0.7.0"
 readonly CONFIG_DIR="/etc/enra"
 readonly CONFIG_FILE="$CONFIG_DIR/enra.conf"
 readonly HOSTAPD_FILE="$CONFIG_DIR/hostapd.conf"
@@ -53,6 +53,14 @@ load_config() {
     [[ -f "$CONFIG_FILE" ]] || die "ENRA is not configured. Run: sudo enra setup"
     # shellcheck source=/etc/enra/enra.conf
     source "$CONFIG_FILE"
+    WIFI_MAC="${WIFI_MAC:-}"
+    UPLINK_MAC="${UPLINK_MAC:-}"
+    AUTO_DISCOVER_WIFI="${AUTO_DISCOVER_WIFI:-true}"
+    case "${AUTO_DISCOVER_WIFI,,}" in
+        true|yes|1|on) AUTO_DISCOVER_WIFI=true ;;
+        false|no|0|off) AUTO_DISCOVER_WIFI=false ;;
+        *) die "AUTO_DISCOVER_WIFI must be true or false." ;;
+    esac
     AUTO_UP_INTERFACES="${AUTO_UP_INTERFACES:-true}"
     AUTO_UP_EXCLUDE="${AUTO_UP_EXCLUDE:-}"
     AUTO_ADD_INTERFACES="${AUTO_ADD_INTERFACES:-true}"
@@ -161,6 +169,163 @@ supports_ap_mode() {
              END {if (!found) exit 1}'
 }
 
+interface_mac() {
+    local iface="$1"
+    [[ -r "/sys/class/net/$iface/address" ]] || return 1
+    tr '[:upper:]' '[:lower:]' < "/sys/class/net/$iface/address"
+}
+
+replace_interface_directive() {
+    local file="$1" old_iface="$2" new_iface="$3" directive="$4" temp mode
+    [[ -f "$file" && -n "$old_iface" && "$old_iface" != "$new_iface" ]] || return 0
+    temp="$(mktemp "\${file}.XXXXXX")"
+    mode="$(stat -c '%a' "$file" 2>/dev/null || printf '600')"
+    awk -v prefix="\${directive}=" -v old="$old_iface" -v new="$new_iface" '
+        $0 == prefix old { print prefix new; next }
+        { print }
+    ' "$file" > "$temp" || {
+        rm -f "$temp"
+        return 1
+    }
+    chmod "$mode" "$temp"
+    mv -f -- "$temp" "$file"
+}
+
+wireless_ap_interfaces() {
+    local iface
+    while IFS= read -r iface; do
+        [[ -n "$iface" ]] || continue
+        supports_ap_mode "$iface" && printf '%s\n' "$iface"
+    done < <(wireless_list)
+}
+
+resolve_wireless_interface() {
+    local old_iface="$WIFI_IF" iface candidate="" mac candidates count=0
+    command -v rfkill >/dev/null 2>&1 && rfkill unblock wifi >/dev/null 2>&1 || true
+
+    if [[ -n "$WIFI_IF" ]] && iw dev "$WIFI_IF" info >/dev/null 2>&1 && supports_ap_mode "$WIFI_IF"; then
+        mac="$(interface_mac "$WIFI_IF" 2>/dev/null || true)"
+        if [[ -n "$mac" && "$mac" != "\${WIFI_MAC:-}" ]]; then
+            WIFI_MAC="$mac"
+            save_main_config
+            log "Saved Wi-Fi adapter identity: $WIFI_IF ($WIFI_MAC)."
+        fi
+        return 0
+    fi
+
+    if [[ -n "\${WIFI_MAC:-}" ]]; then
+        while IFS= read -r iface; do
+            [[ -n "$iface" ]] || continue
+            supports_ap_mode "$iface" || continue
+            mac="$(interface_mac "$iface" 2>/dev/null || true)"
+            if [[ "$mac" == "$WIFI_MAC" ]]; then
+                candidate="$iface"
+                break
+            fi
+        done < <(wireless_list)
+    fi
+
+    if [[ -z "$candidate" ]]; then
+        case "\${AUTO_DISCOVER_WIFI,,}" in
+            true|yes|1|on)
+                candidates="$(wireless_ap_interfaces)"
+                count="$(grep -c . <<< "$candidates" || true)"
+                if (( count == 1 )); then
+                    candidate="$candidates"
+                elif (( count > 1 )); then
+                    warn "Multiple AP-capable Wi-Fi interfaces were detected and the configured adapter is unavailable. Reconnect the configured adapter or run 'enra setup' to select one."
+                    return 1
+                fi
+                ;;
+            *)
+                warn "Automatic Wi-Fi adapter discovery is disabled."
+                return 1
+                ;;
+        esac
+    fi
+
+    if [[ -z "$candidate" ]]; then
+        warn "No AP-capable Wi-Fi adapter is currently available."
+        return 1
+    fi
+
+    WIFI_IF="$candidate"
+    WIFI_MAC="$(interface_mac "$candidate" 2>/dev/null || true)"
+    if [[ "$NETWORK_MODE" == "routed" && "\${SEGMENT_IFACES[0]:-}" == "$old_iface" ]]; then
+        SEGMENT_IFACES[0]="$candidate"
+    fi
+
+    replace_interface_directive "$HOSTAPD_FILE" "$old_iface" "$candidate" interface
+    if [[ "$NETWORK_MODE" == "routed" ]]; then
+        replace_interface_directive "$DNSMASQ_FILE" "$old_iface" "$candidate" interface
+    fi
+    [[ -z "$old_iface" ]] || rm -f "/etc/systemd/network/00-enra-$old_iface.network"
+    save_main_config
+    configure_network_manager
+    configure_networkd_unmanaged
+    success "Bound ENRA to detected Wi-Fi adapter $WIFI_IF ($WIFI_MAC)."
+    return 0
+}
+
+resolve_uplink_interface() {
+    local old_iface="$UPLINK_IF" iface candidate="" mac iface_path
+    if [[ -n "$UPLINK_IF" ]] && ip link show dev "$UPLINK_IF" >/dev/null 2>&1; then
+        mac="$(interface_mac "$UPLINK_IF" 2>/dev/null || true)"
+        if [[ -n "$mac" && "$mac" != "\${UPLINK_MAC:-}" ]]; then
+            UPLINK_MAC="$mac"
+            save_main_config
+            log "Saved upstream adapter identity: $UPLINK_IF ($UPLINK_MAC)."
+        fi
+        return 0
+    fi
+
+    [[ -n "\${UPLINK_MAC:-}" ]] || {
+        warn "Configured upstream interface $UPLINK_IF is missing and has no saved MAC identity. Run 'enra setup' to select its replacement."
+        return 1
+    }
+
+    for iface_path in /sys/class/net/*; do
+        [[ -d "$iface_path" ]] || continue
+        iface="\${iface_path##*/}"
+        [[ "$iface" != "lo" ]] || continue
+        [[ "$(cat "$iface_path/type" 2>/dev/null || echo 0)" == "1" ]] || continue
+        [[ -d "$iface_path/device" ]] || continue
+        [[ ! -d "$iface_path/phy80211" ]] || continue
+        mac="$(interface_mac "$iface" 2>/dev/null || true)"
+        if [[ "$mac" == "$UPLINK_MAC" ]]; then
+            candidate="$iface"
+            break
+        fi
+    done
+
+    if [[ -z "$candidate" ]]; then
+        warn "The configured upstream adapter ($UPLINK_MAC) is not currently present."
+        return 1
+    fi
+
+    UPLINK_IF="$candidate"
+    [[ -z "$old_iface" ]] || rm -f "/etc/systemd/network/00-enra-$old_iface.network"
+    save_main_config
+    configure_network_manager
+    configure_networkd_unmanaged
+    success "Rebound ENRA upstream to adapter $UPLINK_IF ($UPLINK_MAC)."
+    return 0
+}
+
+resolve_configured_interfaces() {
+    local wifi_ready=yes uplink_ready=yes
+    resolve_wireless_interface || wifi_ready=no
+    resolve_uplink_interface || uplink_ready=no
+
+    [[ "$wifi_ready" == "yes" ]] || return 1
+    if [[ "$NETWORK_MODE" == "bridge" && "$uplink_ready" != "yes" ]]; then
+        warn "Bridge mode is waiting for its configured Ethernet interface."
+        return 1
+    fi
+    return 0
+}
+
+
 install_rtl8821au_firmware() {
     log "Checking firmware package for RTL8821AU."
     case "$PACKAGE_MANAGER:$DISTRO_ID" in
@@ -252,7 +417,8 @@ choose_wireless_interface() {
         grep -Fxq "$WIFI_IF" <<< "$choices" || die "That interface was not detected."
     fi
     supports_ap_mode "$WIFI_IF" || die "$WIFI_IF does not advertise AP mode. Use an adapter/driver with AP-mode support."
-    success "Access-point interface: $WIFI_IF"
+    WIFI_MAC="$(interface_mac "$WIFI_IF" 2>/dev/null || true)"
+    success "Access-point interface: $WIFI_IF (${WIFI_MAC:-MAC unavailable})"
 }
 
 choose_network_mode() {
@@ -373,6 +539,7 @@ configure_interfaces() {
     local segment_count selected i default_gateway gateway prefix start end network existing
     if [[ "$NETWORK_MODE" == "bridge" ]]; then
         UPLINK_IF="$(choose_interface "Interface connected to the LAN being bridged" yes)"
+        UPLINK_MAC="$(interface_mac "$UPLINK_IF" 2>/dev/null || true)"
         [[ "$UPLINK_IF" != "$WIFI_IF" ]] || die "Wired and wireless interfaces must be different."
         validate_bridge_port "$UPLINK_IF"
         AP_GATEWAY="" AP_PREFIX="" AP_NETWORK="" DHCP_START="" DHCP_END="" DNS_UPSTREAM=""
@@ -382,6 +549,7 @@ configure_interfaces() {
     fi
 
     UPLINK_IF="$(choose_interface "Internet/upstream interface" no)"
+    UPLINK_MAC="$(interface_mac "$UPLINK_IF" 2>/dev/null || true)"
     [[ "$UPLINK_IF" != "$WIFI_IF" ]] || die "AP and uplink interfaces must be different."
 
     DNS_UPSTREAM=""
@@ -518,8 +686,9 @@ save_main_config() {
     chmod 700 "$CONFIG_DIR"
     config_tmp="$(mktemp "$CONFIG_DIR/.enra.conf.XXXXXX")"
     {
-        printf 'NETWORK_MODE=%q\nWIFI_IF=%q\nUPLINK_IF=%q\nSSID=%q\nSSID_HEX=%q\n' \
-            "$NETWORK_MODE" "$WIFI_IF" "$UPLINK_IF" "$SSID" "$SSID_HEX"
+        printf 'NETWORK_MODE=%q\nWIFI_IF=%q\nWIFI_MAC=%q\nUPLINK_IF=%q\nUPLINK_MAC=%q\nSSID=%q\nSSID_HEX=%q\n' \
+            "$NETWORK_MODE" "$WIFI_IF" "${WIFI_MAC:-}" "$UPLINK_IF" "${UPLINK_MAC:-}" "$SSID" "$SSID_HEX"
+        printf 'AUTO_DISCOVER_WIFI=%q\n' "${AUTO_DISCOVER_WIFI:-true}"
         printf 'COUNTRY_CODE=%q\nBAND=%q\nCHANNEL=%q\nSECURITY=%q\n' "$COUNTRY_CODE" "$BAND" "$CHANNEL" "$SECURITY"
         printf 'AP_GATEWAY=%q\nAP_PREFIX=%q\nAP_NETWORK=%q\n' "$AP_GATEWAY" "$AP_PREFIX" "$AP_NETWORK"
         printf 'DHCP_START=%q\nDHCP_END=%q\nDNS_UPSTREAM=%q\nDRIVER_MODULE=%q\n' \
