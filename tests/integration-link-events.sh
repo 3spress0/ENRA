@@ -41,8 +41,9 @@ ip -n "$namespace" link set enra-peer0 down
 sleep 0.3
 ip -n "$namespace" link set enra-peer0 up
 
-for attempt in {1..30}; do
-    grep -q 'enra-test0' "$events" && break
+attempts=0
+while ! grep -q 'enra-test0' "$events" && (( attempts < 30 )); do
+    attempts=$((attempts + 1))
     sleep 0.1
 done
 
