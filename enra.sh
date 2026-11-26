@@ -560,7 +560,11 @@ choose_interface() {
         iface="${path##*/}"
         [[ "$iface" != "lo" && "$iface" != "$WIFI_IF" && "$iface" != "$BRIDGE_IF" ]] || continue
         kind="$(interface_type_label "$iface")"
-        [[ "$kind" == "Wired" ]] || continue
+        if [[ "$protect_default" == "yes" ]]; then
+            [[ "$kind" == "Wired" ]] || continue
+        else
+            [[ "$kind" == "Wired" || "$kind" == "Wi-Fi" ]] || continue
+        fi
         link="$(interface_link_label "$iface")"
         ipv4="$(interface_ipv4_label "$iface")"
         route=" "
