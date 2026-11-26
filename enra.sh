@@ -713,7 +713,8 @@ configure_interfaces() {
     UPLINK_MAC="$(interface_mac "$UPLINK_IF" 2>/dev/null || true)"
     [[ "$UPLINK_IF" != "$WIFI_IF" ]] || die "The Wi-Fi adapter and internet adapter must be different."
 
-    DNS_UPSTREAM="1.1.1.1"
+    read -r -p "DNS server for connected devices [1.1.1.1]: " DNS_UPSTREAM
+    DNS_UPSTREAM="${DNS_UPSTREAM:-1.1.1.1}"
     SEGMENT_IFACES=("$WIFI_IF")
     SEGMENT_MACS=("$WIFI_MAC")
     SEGMENT_NAMES=("Wi-Fi")
