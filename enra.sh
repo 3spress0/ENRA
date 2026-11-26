@@ -850,7 +850,7 @@ configure_interfaces() {
 
 configure_radio() {
     local answer default_channel detected_country
-    detected_country="$(iw reg get 2>/dev/null | awk '$1 == "country" {gsub(":", "", $2); print $2; exit}')"
+    detected_country="$(iw reg get 2>/dev/null | awk '$1 == "country" {candidate=$2; sub(/:$/, "", candidate); if (candidate ~ /^[A-Z][A-Z]$/) {print candidate; exit}}')"
     [[ "$detected_country" =~ ^[A-Z]{2}$ && "$detected_country" != "00" ]] || detected_country="NL"
     read -r -p "Country/region code (two letters, for example NL) [$detected_country]: " COUNTRY_CODE
     COUNTRY_CODE="${COUNTRY_CODE:-$detected_country}"
