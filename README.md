@@ -2,26 +2,52 @@
 
 **espress0's Network Routing Architecture**
 
-ENRA is a configurable Linux access-point and network-edge utility built around hostapd, nl80211, Linux networking and systemd. It supports multiple package families, wireless adapters with Linux AP-mode support, radio settings, security profiles and two common network topologies. Adapter driver installation is deliberately separate from AP configuration: ENRA will not guess and replace arbitrary third-party drivers.
+ENRA turns a Linux computer into a configurable Wi-Fi access point and network router. It detects supported network adapters, configures the required Linux services and keeps the access point available when a cable or adapter is temporarily disconnected.
 
-## TL;DR - Quickstart
+## Install and start
 
-```bash
-git clone https://github.com/3spress0/ENRA.git
-cd ENRA
-sudo ./install.sh
-sudo enra setup
-```
-
-Setup is interactive. Choose **bridge** when an existing router handles DHCP and firewalling, or **routed** when ENRA should provide multiple isolated IPv4 segments with DHCP and NAT. WPA3-Personal is the default, but requires compatible Wi-Fi hardware, drivers, firmware and clients.
-
-After setup:
+Open a terminal and run this single command:
 
 ```bash
-sudo enra status
+curl -fsSL https://raw.githubusercontent.com/3spress0/ENRA/main/install.sh | sudo bash
 ```
+
+The installer downloads ENRA, installs its required packages and starts the guided setup automatically. You do not need to clone the repository or edit configuration files.
+
+On first run, the setup will:
+1. Detect your Wi-Fi adapter and show a numbered list if more than one is available.
+2. Ask how Wi-Fi should connect to your network.
+3. Show a numbered list of wired adapters, including their connection state and current IP address.
+4. Apply safe network defaults, then ask you to choose a Wi-Fi name and password.
+5. Start ENRA and show how to connect your devices.
+
+Press Enter to accept a recommended default. Your Wi-Fi password is not displayed after setup, so keep a copy of it.
+
+To install without starting the wizard, clone the repository and run sudo ./install.sh --install-only, then run sudo enra setup when ready.
+
+## Which network mode should I choose?
+
+| Choose | What it does | Use it when |
+|---|---|---|
+| **Join my existing network (Bridge)** | ENRA adds Wi-Fi to the same network as the wired connection. Your existing router/firewall still handles IP addresses and network policy. | You already have a router or firewall such as OPNsense and want another access point. |
+| **Create a separate network (Routed)** | ENRA creates a separate Wi-Fi network and handles device addresses, routing, NAT and isolation. | You want devices on ENRA to be on a different network behind your existing router. |
+
+Bridge mode requires a separate wired adapter for the network being extended. ENRA deliberately protects the adapter carrying the computer's current default internet route. Do not choose the computer's only management/internet connection as a bridge port.
+
+For most installations, the Wi-Fi network is the only ENRA segment needed. Additional wired network segments are optional.
+
+## Requirements
+
+- A systemd-based Linux distribution using APT, DNF, Pacman or Zypper.
+- A Wi-Fi adapter and Linux driver that support access-point mode.
+- A wired adapter for bridge mode, or a wired upstream connection for routed mode.
+- Root access to install packages and configure network services.
+
+ENRA cannot use a USB/network adapter that the operating system or virtual machine does not detect. For a virtual machine, connect the virtual network adapter or pass the USB Wi-Fi adapter through to the guest before starting setup.
 
 ## Features
+
+
 
 - Interactive setup with wireless hardware and interface discovery.
 - Layer 2 bridge mode or multi-segment routed/NAT mode.
@@ -115,11 +141,11 @@ Automatic routed integration is intentionally disabled in bridge mode. Additiona
 - **WPA2-Personal:** PSK with AES/CCMP.
 - **Transition mode:** WPA2-PSK and WPA3-SAE together for older clients.
 
-WPA3 is the default. Linux alone does not guarantee WPA3 AP support. The adapter driver, firmware, hostapd build and clients must all support the selected mode. ENRA checks AP mode; service logs show hostapd errors.
+The first-run wizard defaults to WPA2/WPA3 transition mode so both newer and older clients can connect. Choose WPA3-only when every client supports it. Linux alone does not guarantee WPA3 AP support: the adapter driver, firmware, hostapd build and clients must support the selected mode. ENRA checks access-point mode; service logs show hostapd errors.
 
 ## Setup behavior
 
-Setup detects the package manager, installs hostapd and wireless tools, discovers wireless interfaces and verifies AP mode. Routed mode asks for one upstream interface, the Wi-Fi segment settings and a number of additional dedicated Ethernet segments. Each manually selected Ethernet segment is configured with its own interface, gateway, subnet and DHCP range. After the core services start, ENRA scans for other eligible Ethernet NICs. A udev rule also handles NICs connected later. ENRA marks selected downstream interfaces unmanaged in NetworkManager and systemd-networkd where those services are active. If ifupdown has an explicit stanza for a bridge port, setup stops rather than silently rewriting it. If no wireless interface is detected, setup prints a warning and exits without configuring services; connect the adapter/install its driver and rerun setup.
+Setup detects the package manager, installs hostapd and wireless tools, discovers wireless interfaces and verifies AP mode. Adapter selection uses numbered menus with connection state and IPv4 information instead of requiring users to remember interface names. Routed mode asks for one upstream interface, selects a non-conflicting Wi-Fi subnet and DHCP range automatically, and only asks for extra wired segments when the user opts in. Advanced users can still customize the gateway, subnet prefix and DHCP range during setup. A udev rule also handles NICs connected later. ENRA marks selected downstream interfaces unmanaged in NetworkManager and systemd-networkd where those services are active. If ifupdown has an explicit stanza for a bridge port, setup stops rather than silently rewriting it. If no wireless interface is detected, setup prints a warning and exits without configuring services; connect the adapter/install its driver and rerun setup.
 
 ### Existing Debian + RTL8821AU + OPNsense setup
 
@@ -145,7 +171,7 @@ The RTL8821AU maintainers recommend an in-kernel driver where available on moder
 
 ## Commands
 
-Install ENRA from a cloned repository with **sudo ./install.sh**. The installer places the command at **/usr/local/sbin/enra** and the updater at **/usr/local/sbin/enra-update**. You can then use ENRA from your PATH:
+When run from a cloned repository, **sudo ./install.sh** installs ENRA and starts the guided setup automatically. Use **sudo ./install.sh --install-only** to install without starting setup. The installer places the command at **/usr/local/sbin/enra** and the updater at **/usr/local/sbin/enra-update**. You can then use ENRA from your PATH:
 
 ~~~bash
 sudo enra setup
@@ -162,11 +188,10 @@ sudo enra remove-segment enp3s0
 sudo enra logs
 ~~~
 
-The installer can also be run directly from GitHub:
+The same one-command installer is available directly from GitHub:
 
 ~~~bash
 curl -fsSL https://raw.githubusercontent.com/3spress0/ENRA/main/install.sh | sudo bash
-sudo enra setup
 ~~~
 
 **Lifecycle commands:** `sudo enra stop` stops ENRA for the current session without changing boot startup. `sudo enra disable` stops services, disables boot startup and removes the hotplug udev rule while retaining configuration. `sudo enra start` starts ENRA for the current session and restores hotplug handling; `sudo enra enable` also enables boot startup. `sudo enra uninstall` asks for confirmation, then removes ENRA services, configuration and installed commands. A separately installed Wi-Fi DKMS driver is not removed.

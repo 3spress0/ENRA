@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly ENRA_VERSION="0.7.0"
+readonly ENRA_VERSION="0.8.0"
 readonly CONFIG_DIR="/etc/enra"
 readonly CONFIG_FILE="$CONFIG_DIR/enra.conf"
 readonly HOSTAPD_FILE="$CONFIG_DIR/hostapd.conf"
@@ -212,6 +212,64 @@ wireless_ap_interfaces() {
     done < <(wireless_list)
 }
 
+
+interface_type_label() {
+    local iface="$1"
+    if iw dev "$iface" info >/dev/null 2>&1; then
+        printf 'Wi-Fi'
+    elif [[ "$(cat "/sys/class/net/$iface/type" 2>/dev/null || printf '0')" == "1" && -e "/sys/class/net/$iface/device" ]]; then
+        printf 'Wired'
+    else
+        printf 'Virtual/other'
+    fi
+}
+
+interface_link_label() {
+    local iface="$1" carrier state kind
+    kind="$(interface_type_label "$iface")"
+    state="$(cat "/sys/class/net/$iface/operstate" 2>/dev/null || printf 'unknown')"
+    if [[ "$kind" == "Wi-Fi" ]]; then
+        if iw dev "$iface" link 2>/dev/null | grep -q '^Connected to '; then
+            printf 'Connected'
+        else
+            printf 'Not associated'
+        fi
+        return 0
+    fi
+    if [[ -r "/sys/class/net/$iface/carrier" ]]; then
+        carrier="$(cat "/sys/class/net/$iface/carrier" 2>/dev/null || true)"
+        if [[ "$carrier" == "1" ]]; then
+            printf 'Connected'
+        elif [[ "$kind" == "Wired" ]]; then
+            printf 'Cable unplugged'
+        else
+            printf 'Not connected'
+        fi
+        return 0
+    fi
+    case "$state" in
+        up) printf 'Up' ;;
+        down) printf 'Down' ;;
+        dormant) printf 'Waiting' ;;
+        *) printf '%s' "$state" ;;
+    esac
+}
+
+interface_ipv4_label() {
+    local iface="$1" addresses
+    addresses="$(ip -o -4 address show dev "$iface" scope global 2>/dev/null | awk '{print $4}' | paste -sd ',' -)"
+    printf '%s' "${addresses:--}"
+}
+
+is_default_route_interface() {
+    local iface="$1"
+    if ip -4 route show default 2>/dev/null | awk -v wanted="$iface" '{for (i=1; i<NF; i++) if ($i == "dev" && $(i+1) == wanted) found=1} END {exit !found}'; then
+        return 0
+    fi
+    ip -6 route show default 2>/dev/null | awk -v wanted="$iface" '{for (i=1; i<NF; i++) if ($i == "dev" && $(i+1) == wanted) found=1} END {exit !found}'
+}
+
+
 resolve_wireless_interface() {
     local old_iface="$WIFI_IF" iface candidate="" mac candidates count=0
     if [[ -n "${DRIVER_MODULE:-}" ]]; then
@@ -290,7 +348,7 @@ resolve_wireless_interface() {
 }
 
 resolve_uplink_interface() {
-    local old_iface="$UPLINK_IF" iface candidate="" mac iface_path
+    local old_iface="$UPLINK_IF" iface candidate="" candidate_type mac iface_path
     if [[ -n "$UPLINK_IF" ]] && ip link show dev "$UPLINK_IF" >/dev/null 2>&1; then
         mac="$(interface_mac "$UPLINK_IF" 2>/dev/null || true)"
         if [[ -n "$mac" && "$mac" != "${UPLINK_MAC:-}" ]]; then
@@ -310,12 +368,11 @@ resolve_uplink_interface() {
     for iface_path in /sys/class/net/*; do
         [[ -d "$iface_path" ]] || continue
         iface="${iface_path##*/}"
-        [[ "$iface" != "lo" ]] || continue
-        [[ "$(cat "$iface_path/type" 2>/dev/null || echo 0)" == "1" ]] || continue
-        [[ -d "$iface_path/device" ]] || continue
-        [[ ! -d "$iface_path/phy80211" ]] || continue
+        [[ "$iface" != "lo" && "$iface" != "$BRIDGE_IF" && "$iface" != "$WIFI_IF" ]] || continue
+        candidate_type="$(interface_type_label "$iface")"
+        [[ "$candidate_type" == "Wired" || "$candidate_type" == "Wi-Fi" ]] || continue
         mac="$(interface_mac "$iface" 2>/dev/null || true)"
-        if [[ "$mac" == "$UPLINK_MAC" ]]; then
+        if [[ -n "$mac" && "$mac" == "$UPLINK_MAC" ]]; then
             candidate="$iface"
             break
         fi
@@ -433,48 +490,154 @@ discover_driver() {
 }
 
 choose_wireless_interface() {
-    local choices
-    choices="$(wireless_list)"
-    [[ -n "$choices" ]] || die "No wireless interface was detected."
-    printf '\nDetected wireless interfaces:\n%s\n' "$choices"
-    if [[ "$(printf '%s\n' "$choices" | wc -l)" -eq 1 ]]; then
-        WIFI_IF="$(printf '%s\n' "$choices" | head -n 1)"
-    else
-        read -r -p "Enter the wireless interface to use: " WIFI_IF
-        grep -Fxq "$WIFI_IF" <<< "$choices" || die "That interface was not detected."
+    local iface selected="" default_index=1 selection selection_number i
+    local -a choices=()
+    mapfile -t choices < <(wireless_ap_interfaces)
+    if (("${#choices[@]}" == 0)); then
+        if [[ -n "$(wireless_list)" ]]; then
+            die "A Wi-Fi adapter was detected, but none of its drivers advertise access-point support. Check adapter/driver compatibility, then run 'sudo enra setup' again."
+        fi
+        die "No Wi-Fi adapter was detected. Connect a supported Wi-Fi adapter and run 'sudo enra setup' again."
     fi
-    supports_ap_mode "$WIFI_IF" || die "$WIFI_IF does not advertise AP mode. Use an adapter/driver with AP-mode support."
+    for i in "${!choices[@]}"; do
+        if [[ "${choices[$i]}" == "${WIFI_IF:-}" ]]; then
+            default_index=$((i + 1))
+            break
+        fi
+    done
+    if (("${#choices[@]}" == 1)); then
+        WIFI_IF="${choices[0]}"
+        success "Detected the Wi-Fi adapter: $WIFI_IF"
+    else
+        printf '\nWi-Fi adapters that support access-point mode:\n' >&2
+        printf '  %-3s %-16s %-16s %-12s\n' "#" "Adapter" "Connection" "IPv4 address" >&2
+        for i in "${!choices[@]}"; do
+            iface="${choices[$i]}"
+            printf '  %-3s %-16s %-16s %-12s\n' "$((i + 1))" "$iface" "$(interface_link_label "$iface")" "$(interface_ipv4_label "$iface")" >&2
+        done
+        read -r -p "Select the Wi-Fi adapter by number [$default_index]: " selection
+        selection="${selection:-$default_index}"
+        if [[ "$selection" =~ ^[0-9]+$ ]]; then
+            selection_number=$((10#$selection))
+        else
+            selection_number=0
+        fi
+        if ((selection_number >= 1 && selection_number <= ${#choices[@]})); then
+            WIFI_IF="${choices[$((selection_number - 1))]}"
+        else
+            for iface in "${choices[@]}"; do
+                if [[ "$selection" == "$iface" ]]; then
+                    WIFI_IF="$iface"
+                    break
+                fi
+            done
+            [[ -n "$WIFI_IF" ]] || die "That selection does not match a listed Wi-Fi adapter."
+        fi
+    fi
+    supports_ap_mode "$WIFI_IF" || die "$WIFI_IF does not advertise access-point mode. Use a compatible Wi-Fi adapter/driver."
     WIFI_MAC="$(interface_mac "$WIFI_IF" 2>/dev/null || true)"
-    success "Access-point interface: $WIFI_IF (${WIFI_MAC:-MAC unavailable})"
+    success "Wi-Fi adapter selected: $WIFI_IF (${WIFI_MAC:-MAC unavailable})"
 }
+
 
 choose_network_mode() {
     local answer
-    printf '\nNetwork mode:\n'
-    printf '  1) bridge - join an existing LAN; its router provides DHCP/routing\n'
-    printf '  2) routed - create a separate IPv4 subnet with DHCP and NAT\n'
-    read -r -p "Select mode [1]: " answer
+    printf '\nHow should devices connected to ENRA reach your network?\n'
+    printf '  1) Join my existing network (Bridge)\n'
+    printf '     Your current router/firewall continues to provide IP addresses and internet access.\n'
+    printf '     Choose this when ENRA should act like an additional Wi-Fi access point.\n'
+    printf '  2) Create a separate network (Routed)\n'
+    printf '     ENRA provides IP addresses, routing and isolation for connected devices.\n'
+    printf '     Choose this when ENRA should create its own network behind your router.\n'
+    read -r -p "Select a mode [1]: " answer
     case "$answer" in
         ""|1|bridge) NETWORK_MODE="bridge" ;;
         2|routed) NETWORK_MODE="routed" ;;
-        *) die "Invalid network mode." ;;
+        *) die "Enter 1 to join your existing network, or 2 to create a separate network." ;;
     esac
 }
 
+
 choose_interface() {
-    local prompt="$1" protect_default="$2" selected
-    printf '\nAvailable interfaces:\n' >&2
-    ip -br link >&2
-    read -r -p "$prompt: " selected
-    [[ -n "$selected" ]] || die "No interface selected."
-    ip link show dev "$selected" >/dev/null 2>&1 || die "Interface does not exist: $selected"
-    if [[ "$protect_default" == "yes" ]] &&
-       { ip route show default | grep -Eq "(^|[[:space:]])dev[[:space:]]+$selected([[:space:]]|$)" ||
-         ip -6 route show default | grep -Eq "(^|[[:space:]])dev[[:space:]]+$selected([[:space:]]|$)"; }; then
-        die "$selected carries a default route. Choose a dedicated LAN/backhaul interface."
+    local prompt="$1" protect_default="$2" iface path kind link ipv4 route selected
+    local default_index=1 default_route_index=0 connected_index=0 selection selection_number i found=no
+    local -a choices=()
+
+    printf '\n%s\n' "$prompt" >&2
+    printf 'Select an adapter number. The current internet adapter is marked and protected when appropriate.\n' >&2
+    printf '  %-3s %-16s %-14s %-18s %-18s %s\n' "#" "Adapter" "Type" "Link" "IPv4 address" "Role" >&2
+
+    for path in /sys/class/net/*; do
+        [[ -d "$path" ]] || continue
+        iface="${path##*/}"
+        [[ "$iface" != "lo" && "$iface" != "$WIFI_IF" && "$iface" != "$BRIDGE_IF" ]] || continue
+        kind="$(interface_type_label "$iface")"
+        if [[ "$protect_default" == "yes" ]]; then
+            [[ "$kind" == "Wired" ]] || continue
+        else
+            [[ "$kind" == "Wired" || "$kind" == "Wi-Fi" ]] || continue
+        fi
+        link="$(interface_link_label "$iface")"
+        ipv4="$(interface_ipv4_label "$iface")"
+        route=" "
+        if is_default_route_interface "$iface"; then
+            route="Internet"
+            if [[ "$protect_default" == "yes" ]]; then
+                printf '  %-3s %-16s %-14s %-18s %-18s %s\n' "-" "$iface" "$kind" "$link" "$ipv4" "In use; not selectable" >&2
+                continue
+            fi
+        fi
+        choices+=("$iface")
+        i="${#choices[@]}"
+        printf '  %-3s %-16s %-14s %-18s %-18s %s\n' "$i" "$iface" "$kind" "$link" "$ipv4" "$route" >&2
+        if [[ "$link" == "Connected" && "$connected_index" -eq 0 ]]; then
+            connected_index="$i"
+        fi
+        if [[ "$protect_default" != "yes" && "$route" == "Internet" && "$default_route_index" -eq 0 ]]; then
+            default_route_index="$i"
+        fi
+    done
+
+    if [[ "$protect_default" == "yes" ]]; then
+        (( connected_index == 0 )) || default_index="$connected_index"
+    elif (( default_route_index > 0 )); then
+        default_index="$default_route_index"
+    elif (( connected_index > 0 )); then
+        default_index="$connected_index"
+    fi
+
+    (("${#choices[@]}" > 0)) || {
+        if [[ "$protect_default" == "yes" ]]; then
+            die "No unused network adapter is available. Connect a separate Ethernet cable/adapter for ENRA. Your current internet adapter was intentionally protected."
+        fi
+        die "No suitable network adapter was detected. Connect the adapter and try again."
+    }
+
+    read -r -p "Select an adapter by number [$default_index]: " selected
+    selected="${selected:-$default_index}"
+    if [[ "$selected" =~ ^[0-9]+$ ]]; then
+        selection_number=$((10#$selected))
+    else
+        selection_number=0
+    fi
+    if ((selection_number >= 1 && selection_number <= ${#choices[@]})); then
+        selected="${choices[$((selection_number - 1))]}"
+    else
+        for iface in "${choices[@]}"; do
+            if [[ "$selected" == "$iface" ]]; then
+                found=yes
+                break
+            fi
+        done
+        [[ "$found" == "yes" ]] || die "That selection does not match a listed adapter."
+    fi
+    ip link show dev "$selected" >/dev/null 2>&1 || die "The selected adapter is no longer available: $selected"
+    if [[ "$protect_default" == "yes" ]] && is_default_route_interface "$selected"; then
+        die "$selected is carrying the computer's internet/default route. Choose a separate adapter connected to the LAN instead."
     fi
     printf '%s' "$selected"
 }
+
 
 validate_bridge_port() {
     local iface="$1"
@@ -564,10 +727,12 @@ PY
 
 configure_interfaces() {
     local segment_count selected i default_gateway gateway prefix start end network existing
+    local customize add_segments
+
     if [[ "$NETWORK_MODE" == "bridge" ]]; then
-        UPLINK_IF="$(choose_interface "Interface connected to the LAN being bridged" yes)"
+        UPLINK_IF="$(choose_interface "Select the wired adapter connected to the network you want Wi-Fi to join." yes)"
         UPLINK_MAC="$(interface_mac "$UPLINK_IF" 2>/dev/null || true)"
-        [[ "$UPLINK_IF" != "$WIFI_IF" ]] || die "Wired and wireless interfaces must be different."
+        [[ "$UPLINK_IF" != "$WIFI_IF" ]] || die "The Wi-Fi adapter and wired adapter must be different."
         validate_bridge_port "$UPLINK_IF"
         AP_GATEWAY="" AP_PREFIX="" AP_NETWORK="" DHCP_START="" DHCP_END="" DNS_UPSTREAM=""
         SEGMENT_IFACES=() SEGMENT_NAMES=() SEGMENT_GATEWAYS=() SEGMENT_PREFIXES=()
@@ -575,14 +740,14 @@ configure_interfaces() {
         return 0
     fi
 
-    UPLINK_IF="$(choose_interface "Internet/upstream interface" no)"
+    UPLINK_IF="$(choose_interface "Select the adapter connected to your existing router/internet." no)"
     UPLINK_MAC="$(interface_mac "$UPLINK_IF" 2>/dev/null || true)"
-    [[ "$UPLINK_IF" != "$WIFI_IF" ]] || die "AP and uplink interfaces must be different."
+    [[ "$UPLINK_IF" != "$WIFI_IF" ]] || die "The Wi-Fi adapter and internet adapter must be different."
 
-    DNS_UPSTREAM=""
-    read -r -p "Upstream DNS server [1.1.1.1]: " DNS_UPSTREAM
+    read -r -p "DNS server for connected devices [1.1.1.1]: " DNS_UPSTREAM
     DNS_UPSTREAM="${DNS_UPSTREAM:-1.1.1.1}"
-
+    python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' "$DNS_UPSTREAM" >/dev/null 2>&1 ||
+        die "Enter a valid IPv4 DNS server address, for example 1.1.1.1."
     SEGMENT_IFACES=("$WIFI_IF")
     SEGMENT_MACS=("$WIFI_MAC")
     SEGMENT_NAMES=("Wi-Fi")
@@ -592,31 +757,57 @@ configure_interfaces() {
     SEGMENT_DHCP_STARTS=()
     SEGMENT_DHCP_ENDS=()
 
-    read -r -p "Wi-Fi segment gateway IPv4 [10.42.0.1]: " gateway
-    gateway="${gateway:-10.42.0.1}"
-    read -r -p "Wi-Fi segment subnet prefix [24]: " prefix
-    prefix="${prefix:-24}"
-    read -r -p "Wi-Fi DHCP range start [10.42.0.50]: " start
-    start="${start:-10.42.0.50}"
-    read -r -p "Wi-Fi DHCP range end [10.42.0.200]: " end
-    end="${end:-10.42.0.200}"
-    network="$(validate_segment_network "$gateway" "$prefix" "$start" "$end" "$DNS_UPSTREAM")" ||
-        die "Invalid Wi-Fi segment network settings."
+    gateway="10.42.0.1"
+    prefix="24"
+    start="10.42.0.50"
+    end="10.42.0.200"
+    if ! network="$(validate_segment_network "$gateway" "$prefix" "$start" "$end" "$DNS_UPSTREAM" 2>/dev/null)"; then
+        warn "The recommended Wi-Fi subnet is already in use. ENRA will select an unused subnet automatically."
+        network="$(next_segment_network)" || die "ENRA could not find an unused Wi-Fi subnet. Connect the adapters you need, then try again."
+        gateway="${network%/*}"
+        gateway="${gateway%.*}.1"
+        start="${gateway%.*}.50"
+        end="${gateway%.*}.200"
+    fi
+
+    printf '\nENRA has selected safe default network settings for Wi-Fi:\n' >&2
+    printf '  Gateway: %s\n  Device address range: %s-%s\n' "$gateway" "$start" "$end" >&2
+    read -r -p "Do you need to customize these network settings? [y/N]: " customize
+    if [[ "$customize" =~ ^[Yy]$ ]]; then
+        read -r -p "Wi-Fi gateway address [$gateway]: " selected
+        gateway="${selected:-$gateway}"
+        read -r -p "Subnet prefix length [$prefix]: " selected
+        prefix="${selected:-$prefix}"
+        read -r -p "First device address [$start]: " selected
+        start="${selected:-$start}"
+        read -r -p "Last device address [$end]: " selected
+        end="${selected:-$end}"
+        network="$(validate_segment_network "$gateway" "$prefix" "$start" "$end" "$DNS_UPSTREAM")" ||
+            die "The custom Wi-Fi network settings are invalid or overlap an existing network."
+    fi
+
     SEGMENT_GATEWAYS+=("$gateway")
     SEGMENT_PREFIXES+=("$prefix")
     SEGMENT_NETWORKS+=("$network")
     SEGMENT_DHCP_STARTS+=("$start")
     SEGMENT_DHCP_ENDS+=("$end")
 
-    printf '\\nEach Ethernet segment needs a dedicated interface and receives its own isolated IPv4 subnet.\\n'
-    read -r -p "Additional Ethernet LAN segments [0]: " segment_count
-    segment_count="${segment_count:-0}"
-    [[ "$segment_count" =~ ^(0|[1-9][0-9]*)$ ]] || die "Enter a whole number of additional Ethernet segments."
-    (( segment_count <= 32 )) || die "ENRA supports up to 32 additional Ethernet segments per instance."
+    printf '\nMost installations only need the Wi-Fi network.\n' >&2
+    printf 'Only add wired segments when you have extra Ethernet adapters connected for separate networks.\n' >&2
+    read -r -p "Add additional wired network segments? [y/N]: " add_segments
+    if [[ "$add_segments" =~ ^[Yy]$ ]]; then
+        read -r -p "How many additional wired adapters? [1]: " segment_count
+        segment_count="${segment_count:-1}"
+    else
+        segment_count=0
+    fi
+    [[ "$segment_count" =~ ^[0-9]+$ ]] || die "Enter a whole number of additional wired adapters."
+    segment_count=$((10#$segment_count))
+    (( segment_count <= 32 )) || die "ENRA supports up to 32 additional wired network segments."
 
     for ((i = 1; i <= segment_count; i++)); do
-        printf '\nEthernet segment %s of %s\n' "$i" "$segment_count"
-        selected="$(choose_interface "Dedicated Ethernet interface for segment $i" yes)"
+        printf '\nAdditional wired network %s of %s\n' "$i" "$segment_count" >&2
+        selected="$(choose_interface "Select a dedicated wired adapter for this separate network." yes)"
         [[ "$selected" != "$UPLINK_IF" && "$selected" != "$WIFI_IF" ]] ||
             die "$selected is already assigned to another ENRA role."
         for existing in "${SEGMENT_IFACES[@]}"; do
@@ -625,16 +816,17 @@ configure_interfaces() {
         validate_routed_port "$selected"
 
         default_gateway="10.$((42 + i)).0.1"
-        read -r -p "Segment $i gateway IPv4 [$default_gateway]: " gateway
-        gateway="${gateway:-$default_gateway}"
-        read -r -p "Segment $i subnet prefix [24]: " prefix
-        prefix="${prefix:-24}"
-        read -r -p "Segment $i DHCP range start [10.$((42 + i)).0.50]: " start
-        start="${start:-10.$((42 + i)).0.50}"
-        read -r -p "Segment $i DHCP range end [10.$((42 + i)).0.200]: " end
-        end="${end:-10.$((42 + i)).0.200}"
-        network="$(validate_segment_network "$gateway" "$prefix" "$start" "$end" "$DNS_UPSTREAM" "${SEGMENT_NETWORKS[@]}")" ||
-            die "Invalid network settings for Ethernet segment $i."
+        gateway="$default_gateway"
+        prefix="24"
+        start="10.$((42 + i)).0.50"
+        end="10.$((42 + i)).0.200"
+        if ! network="$(validate_segment_network "$gateway" "$prefix" "$start" "$end" "$DNS_UPSTREAM" "${SEGMENT_NETWORKS[@]}" 2>/dev/null)"; then
+            network="$(next_segment_network)" || die "ENRA could not find an unused subnet for wired network $i."
+            gateway="${network%/*}"
+            gateway="${gateway%.*}.1"
+            start="${gateway%.*}.50"
+            end="${gateway%.*}.200"
+        fi
 
         SEGMENT_IFACES+=("$selected")
         SEGMENT_MACS+=("$(interface_mac "$selected" 2>/dev/null || true)")
@@ -644,6 +836,7 @@ configure_interfaces() {
         SEGMENT_NETWORKS+=("$network")
         SEGMENT_DHCP_STARTS+=("$start")
         SEGMENT_DHCP_ENDS+=("$end")
+        printf '  Assigned subnet: %s (gateway %s)\n' "$network" "$gateway" >&2
     done
 
     AP_GATEWAY="${SEGMENT_GATEWAYS[0]}"
@@ -653,48 +846,58 @@ configure_interfaces() {
     DHCP_END="${SEGMENT_DHCP_ENDS[0]}"
 
     if systemctl is-active --quiet dnsmasq.service; then
-        die "The system dnsmasq.service is active. Resolve that DNS/DHCP conflict before choosing routed mode."
+        die "The system dnsmasq.service is active. Stop and inspect that service before choosing a separate ENRA network."
     fi
     return 0
 }
+
+
 configure_radio() {
-    local answer default_channel
-    read -r -p "Regulatory country code (ISO alpha-2) [NL]: " COUNTRY_CODE
-    COUNTRY_CODE="${COUNTRY_CODE:-NL}"
+    local answer default_channel detected_country
+    detected_country="$(iw reg get 2>/dev/null | awk '$1 == "country" {candidate=$2; sub(/:$/, "", candidate); if (candidate ~ /^[A-Z][A-Z]$/) {print candidate; exit}}')"
+    [[ "$detected_country" =~ ^[A-Z]{2}$ && "$detected_country" != "00" ]] || detected_country="NL"
+    read -r -p "Country/region code (two letters, for example NL) [$detected_country]: " COUNTRY_CODE
+    COUNTRY_CODE="${COUNTRY_CODE:-$detected_country}"
     COUNTRY_CODE="${COUNTRY_CODE^^}"
-    [[ "$COUNTRY_CODE" =~ ^[A-Z]{2}$ ]] || die "Country code must contain two letters."
-    printf '\nRadio band:\n  1) 2.4 GHz\n  2) 5 GHz\n'
-    read -r -p "Select band [1]: " answer
+    [[ "$COUNTRY_CODE" =~ ^[A-Z]{2}$ ]] || die "Country/region code must contain two letters."
+
+    printf '\nWi-Fi frequency:\n'
+    printf '  1) 2.4 GHz - longer range and widest device compatibility\n'
+    printf '  2) 5 GHz   - often faster, but shorter range and not supported by every adapter\n'
+    read -r -p "Select frequency [1]: " answer
     case "$answer" in
         ""|1) BAND="2.4"; default_channel=6 ;;
         2) BAND="5"; default_channel=36 ;;
-        *) die "ENRA currently configures 2.4 GHz and 5 GHz APs." ;;
+        *) die "Select 1 for 2.4 GHz or 2 for 5 GHz." ;;
     esac
-    read -r -p "Channel [$default_channel]: " CHANNEL
+    read -r -p "Wi-Fi channel [$default_channel]: " CHANNEL
     CHANNEL="${CHANNEL:-$default_channel}"
     [[ "$CHANNEL" =~ ^[0-9]{1,3}$ ]] || die "Channel must be numeric."
 }
 
+
 configure_security() {
     local answer
-    printf '\nWireless security:\n'
-    printf '  1) WPA3-Personal (SAE, PMF required)\n'
-    printf '  2) WPA2-Personal (PSK, AES/CCMP)\n'
-    printf '  3) WPA2/WPA3 transition mode\n'
-    read -r -p "Select security [1]: " answer
+    printf '\nWi-Fi security:\n'
+    printf '  1) WPA3 - strongest option; all connecting devices must support WPA3\n'
+    printf '  2) WPA2 - works with older devices\n'
+    printf '  3) WPA2/WPA3 mixed - recommended when you are unsure about device compatibility\n'
+    read -r -p "Select security [3]: " answer
     case "$answer" in
-        ""|1) SECURITY="wpa3" ;;
+        1) SECURITY="wpa3" ;;
         2) SECURITY="wpa2" ;;
-        3) SECURITY="transition" ;;
-        *) die "Invalid security mode." ;;
+        ""|3) SECURITY="transition" ;;
+        *) die "Select 1, 2 or 3 for Wi-Fi security." ;;
     esac
     while true; do
-        read -r -s -p "Wi-Fi passphrase (8-63 printable ASCII characters): " PASSPHRASE
+        read -r -s -p "Choose a Wi-Fi password (8-63 printable characters): " PASSPHRASE
         printf '\n'
         [[ "$PASSPHRASE" =~ ^[[:print:]]{8,63}$ ]] && break
-        warn "Passphrase must contain 8-63 printable ASCII characters."
+        warn "The Wi-Fi password must contain 8-63 printable characters."
     done
+    printf 'Keep this password somewhere safe. It is stored in the root-only ENRA configuration and will not be shown again.\n' >&2
 }
+
 
 
 write_config_array() {
@@ -742,17 +945,20 @@ save_main_config() {
 
 write_configuration() {
     local ssid_bytes
-    read -r -p "Wi-Fi network name [espers cool network]: " SSID
-    SSID="${SSID:-espers cool network}"
+    printf '\nChoose the Wi-Fi name that will appear on phones, laptops and other devices.\n' >&2
+    read -r -p "Wi-Fi network name [ENRA Wi-Fi]: " SSID
+    SSID="${SSID:-ENRA Wi-Fi}"
     ssid_bytes="$(LC_ALL=C printf '%s' "$SSID" | wc -c)"
-    [[ "$ssid_bytes" -ge 1 && "$ssid_bytes" -le 32 ]] || die "SSID must contain 1-32 bytes."
-    [[ "$SSID" =~ ^[[:print:]]+$ ]] || die "SSID must contain printable ASCII characters."
+    [[ "$ssid_bytes" -ge 1 && "$ssid_bytes" -le 32 ]] || die "Wi-Fi name must contain 1-32 bytes."
+    [[ "$SSID" =~ ^[[:print:]]+$ ]] || die "Wi-Fi name must contain printable ASCII characters."
     SSID_HEX="$(printf '%s' "$SSID" | od -An -tx1 | tr -d ' \n')"
     save_main_config
     write_hostapd_config
     [[ "$NETWORK_MODE" != "routed" ]] || write_dnsmasq_config
     unset PASSPHRASE
 }
+
+
 write_hostapd_config() {
     local radio security
     if [[ "$BAND" == "2.4" ]]; then
@@ -1062,6 +1268,13 @@ setup() {
     success "ENRA setup completed."
     printf 'Mode: %s\nWireless interface: %s\nSSID: %s\nBand/channel: %s GHz / %s\nSecurity: %s\n' \
         "$NETWORK_MODE" "$WIFI_IF" "$SSID" "$BAND" "$CHANNEL" "$SECURITY"
+    printf '\nConnect your devices to "%s" with the Wi-Fi password you entered during setup.\n' "$SSID"
+    if [[ "$NETWORK_MODE" == "bridge" ]]; then
+        printf 'Your existing router continues to provide IP addresses and network access.\n'
+    else
+        printf 'ENRA provides device addresses and routing for the Wi-Fi network (%s).\n' "$AP_NETWORK"
+    fi
+    printf 'Run "sudo enra status" to check ENRA, or "sudo enra logs" when something is not working.\n'
     if [[ "$NETWORK_MODE" == "routed" ]]; then
         printf 'Routed segments: %s\n' "${#SEGMENT_IFACES[@]}"
         local i
@@ -1159,14 +1372,20 @@ for line in addresses.splitlines():
     except ValueError:
         continue
 
-for second in range(60, 255):
-    for third in range(0, 256):
-        candidate = ipaddress.IPv4Network(f"10.{second}.{third}.0/24")
+pools = (
+    ((10, second, third) for second in range(60, 255) for third in range(256)),
+    ((172, second, third) for second in range(16, 32) for third in range(256)),
+    ((192, 168, third) for third in range(256)),
+)
+
+for pool in pools:
+    for first, second, third in pool:
+        candidate = ipaddress.IPv4Network(f"{first}.{second}.{third}.0/24")
         if not any(candidate.overlaps(network) for network in used):
             print(candidate.with_prefixlen)
             raise SystemExit(0)
 
-raise SystemExit("No unused automatic /24 subnet remains between 10.60.0.0/24 and 10.254.255.0/24.")
+raise SystemExit("No unused /24 subnet remains in ENRA's automatic private IPv4 ranges.")
 PY
 }
 
