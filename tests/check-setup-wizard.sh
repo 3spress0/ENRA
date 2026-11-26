@@ -18,6 +18,7 @@ require_rule() {
 
 require_rule "$INSTALL_SCRIPT" "Installer can run setup automatically" '"$INSTALL_PATH" setup'
 require_rule "$INSTALL_SCRIPT" "Installer supports install-only mode" '--install-only'
+require_rule "$INSTALL_SCRIPT" "Installer checks for an actual controlling terminal" 'exec 9</dev/tty 2>/dev/null'
 require_rule "$INSTALL_SCRIPT" "Piped installer reads prompts from the terminal" 'setup </dev/tty'
 require_rule "$ENRA_SCRIPT" "Wi-Fi adapters are filtered by access-point support" 'mapfile -t choices < <(wireless_ap_interfaces)'
 require_rule "$ENRA_SCRIPT" "Only wired adapters are selectable for Ethernet roles" '[[ "$kind" == "Wired" ]] || continue'
