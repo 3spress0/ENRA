@@ -228,6 +228,14 @@ interface_link_label() {
     local iface="$1" carrier state kind
     kind="$(interface_type_label "$iface")"
     state="$(cat "/sys/class/net/$iface/operstate" 2>/dev/null || printf 'unknown')"
+    if [[ "$kind" == "Wi-Fi" ]]; then
+        if iw dev "$iface" link 2>/dev/null | grep -q '^Connected to '; then
+            printf 'Connected'
+        else
+            printf 'Not associated'
+        fi
+        return 0
+    fi
     if [[ -r "/sys/class/net/$iface/carrier" ]]; then
         carrier="$(cat "/sys/class/net/$iface/carrier" 2>/dev/null || true)"
         if [[ "$carrier" == "1" ]]; then
@@ -545,7 +553,7 @@ choose_network_mode() {
 
 choose_interface() {
     local prompt="$1" protect_default="$2" iface path kind link ipv4 route selected
-    local default_index=1 selection i found=no
+    local default_index=1 default_route_index=0 connected_index=0 selection i found=no
     local -a choices=()
 
     printf '\n%s\n' "$prompt" >&2
@@ -575,10 +583,21 @@ choose_interface() {
         choices+=("$iface")
         i="${#choices[@]}"
         printf '  %-3s %-16s %-14s %-18s %-18s %s\n' "$i" "$iface" "$kind" "$link" "$ipv4" "$route" >&2
-        if [[ "$protect_default" != "yes" && "$route" == "Internet" ]]; then
-            default_index="$i"
+        if [[ "$link" == "Connected" && "$connected_index" -eq 0 ]]; then
+            connected_index="$i"
+        fi
+        if [[ "$protect_default" != "yes" && "$route" == "Internet" && "$default_route_index" -eq 0 ]]; then
+            default_route_index="$i"
         fi
     done
+
+    if [[ "$protect_default" == "yes" ]]; then
+        (( connected_index == 0 )) || default_index="$connected_index"
+    elif (( default_route_index > 0 )); then
+        default_index="$default_route_index"
+    elif (( connected_index > 0 )); then
+        default_index="$connected_index"
+    fi
 
     (("${#choices[@]}" > 0)) || {
         if [[ "$protect_default" == "yes" ]]; then
