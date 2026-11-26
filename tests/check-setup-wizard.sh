@@ -32,6 +32,7 @@ require_rule "$ENRA_SCRIPT" "Interface choices include current IPv4 address" 'in
 require_rule "$ENRA_SCRIPT" "The computer default route is protected for bridge mode" 'In use; not selectable'
 require_rule "$ENRA_SCRIPT" "Routed mode automatically chooses a free subnet when defaults overlap" 'The recommended Wi-Fi subnet is already in use.'
 require_rule "$ENRA_SCRIPT" "Routed mode retains custom DNS resolver configuration" 'DNS server for connected devices [1.1.1.1]:'
+require_rule "$ENRA_SCRIPT" "Custom DNS is validated before subnet fallback" 'IPv4 DNS server address, for example 1.1.1.1.'
 require_rule "$ENRA_SCRIPT" "WPA2/WPA3 compatibility mode is the wizard default" 'Select security [3]: '
 require_rule "$ENRA_SCRIPT" "Country detection skips unset global regulatory domains" 'candidate ~ /^[A-Z][A-Z]$/'
 require_rule "$README_FILE" "README includes one-command installation" 'curl -fsSL https://raw.githubusercontent.com/3spress0/ENRA/main/install.sh | sudo bash'
