@@ -21,7 +21,7 @@ require_rule "Wi-Fi interface selection verifies AP capability" 'supports_ap_mod
 require_rule "A single unambiguous AP adapter can be discovered automatically" 'if (( count == 1 )); then'
 require_rule "Ambiguous Wi-Fi adapter discovery never guesses" 'Multiple AP-capable Wi-Fi interfaces were detected'
 require_rule "Wi-Fi adapters are rebound using saved MAC identity" 'if [[ "$mac" == "$WIFI_MAC" ]]; then'
-require_rule "Ethernet uplinks are rebound using saved MAC identity" 'if [[ "$mac" == "$UPLINK_MAC" ]]; then'
+require_rule "Ethernet and Wi-Fi uplinks are rebound using saved MAC identity" 'if [[ -n "$mac" && "$mac" == "$UPLINK_MAC" ]]; then'
 require_rule "Renamed routed Ethernet adapters restore their saved segment" 'Restoring saved Ethernet segment'
 require_rule "Saved Ethernet segment matching uses the saved MAC" '"$mac" == "${SEGMENT_MACS[$index]:-}"'
 require_rule "Linux link events are monitored continuously" 'ip monitor link'
