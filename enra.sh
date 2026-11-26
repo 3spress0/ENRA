@@ -217,7 +217,7 @@ interface_type_label() {
     local iface="$1"
     if iw dev "$iface" info >/dev/null 2>&1; then
         printf 'Wi-Fi'
-    elif [[ -e "/sys/class/net/$iface/device" ]]; then
+    elif [[ "$(cat "/sys/class/net/$iface/type" 2>/dev/null || printf '0')" == "1" && -e "/sys/class/net/$iface/device" ]]; then
         printf 'Wired'
     else
         printf 'Virtual/other'
@@ -348,7 +348,7 @@ resolve_wireless_interface() {
 }
 
 resolve_uplink_interface() {
-    local old_iface="$UPLINK_IF" iface candidate="" mac iface_path
+    local old_iface="$UPLINK_IF" iface candidate="" candidate_type mac iface_path
     if [[ -n "$UPLINK_IF" ]] && ip link show dev "$UPLINK_IF" >/dev/null 2>&1; then
         mac="$(interface_mac "$UPLINK_IF" 2>/dev/null || true)"
         if [[ -n "$mac" && "$mac" != "${UPLINK_MAC:-}" ]]; then
@@ -369,6 +369,8 @@ resolve_uplink_interface() {
         [[ -d "$iface_path" ]] || continue
         iface="${iface_path##*/}"
         [[ "$iface" != "lo" && "$iface" != "$BRIDGE_IF" && "$iface" != "$WIFI_IF" ]] || continue
+        candidate_type="$(interface_type_label "$iface")"
+        [[ "$candidate_type" == "Wired" || "$candidate_type" == "Wi-Fi" ]] || continue
         mac="$(interface_mac "$iface" 2>/dev/null || true)"
         if [[ -n "$mac" && "$mac" == "$UPLINK_MAC" ]]; then
             candidate="$iface"
@@ -1370,14 +1372,20 @@ for line in addresses.splitlines():
     except ValueError:
         continue
 
-for second in range(60, 255):
-    for third in range(0, 256):
-        candidate = ipaddress.IPv4Network(f"10.{second}.{third}.0/24")
+pools = (
+    ((10, second, third) for second in range(60, 255) for third in range(256)),
+    ((172, second, third) for second in range(16, 32) for third in range(256)),
+    ((192, 168, third) for third in range(256)),
+)
+
+for pool in pools:
+    for first, second, third in pool:
+        candidate = ipaddress.IPv4Network(f"{first}.{second}.{third}.0/24")
         if not any(candidate.overlaps(network) for network in used):
             print(candidate.with_prefixlen)
             raise SystemExit(0)
 
-raise SystemExit("No unused automatic /24 subnet remains between 10.60.0.0/24 and 10.254.255.0/24.")
+raise SystemExit("No unused /24 subnet remains in ENRA's automatic private IPv4 ranges.")
 PY
 }
 
