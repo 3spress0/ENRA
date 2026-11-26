@@ -31,6 +31,8 @@ require_rule "$ENRA_SCRIPT" "Connected interfaces are preferred when no default 
 require_rule "$ENRA_SCRIPT" "Interface choices include current IPv4 address" 'interface_ipv4_label "$iface"'
 require_rule "$ENRA_SCRIPT" "The computer default route is protected for bridge mode" 'In use; not selectable'
 require_rule "$ENRA_SCRIPT" "Routed mode automatically chooses a free subnet when defaults overlap" 'The recommended Wi-Fi subnet is already in use.'
+require_rule "$ENRA_SCRIPT" "Subnet fallback searches 172.16/12 and 192.168/16" 'range(16, 32)'
+require_rule "$ENRA_SCRIPT" "Only Ethernet link-layer devices with a device path are classified as wired" 'cat "/sys/class/net/$iface/type"'
 require_rule "$ENRA_SCRIPT" "Routed mode retains custom DNS resolver configuration" 'DNS server for connected devices [1.1.1.1]:'
 require_rule "$ENRA_SCRIPT" "Custom DNS is validated before subnet fallback" 'IPv4 DNS server address, for example 1.1.1.1.'
 require_rule "$ENRA_SCRIPT" "WPA2/WPA3 compatibility mode is the wizard default" 'Select security [3]: '
