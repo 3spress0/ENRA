@@ -360,12 +360,9 @@ resolve_uplink_interface() {
     for iface_path in /sys/class/net/*; do
         [[ -d "$iface_path" ]] || continue
         iface="${iface_path##*/}"
-        [[ "$iface" != "lo" ]] || continue
-        [[ "$(cat "$iface_path/type" 2>/dev/null || echo 0)" == "1" ]] || continue
-        [[ -d "$iface_path/device" ]] || continue
-        [[ ! -d "$iface_path/phy80211" ]] || continue
+        [[ "$iface" != "lo" && "$iface" != "$BRIDGE_IF" && "$iface" != "$WIFI_IF" ]] || continue
         mac="$(interface_mac "$iface" 2>/dev/null || true)"
-        if [[ "$mac" == "$UPLINK_MAC" ]]; then
+        if [[ -n "$mac" && "$mac" == "$UPLINK_MAC" ]]; then
             candidate="$iface"
             break
         fi
