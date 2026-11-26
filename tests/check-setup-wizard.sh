@@ -21,6 +21,8 @@ require_rule "$INSTALL_SCRIPT" "Installer supports install-only mode" '--install
 require_rule "$INSTALL_SCRIPT" "Installer checks for an actual controlling terminal" 'exec 9</dev/tty 2>/dev/null'
 require_rule "$INSTALL_SCRIPT" "Piped installer reads prompts from the terminal" 'setup </dev/tty'
 require_rule "$ENRA_SCRIPT" "Wi-Fi adapters are filtered by access-point support" 'mapfile -t choices < <(wireless_ap_interfaces)'
+require_rule "$ENRA_SCRIPT" "Wi-Fi menu indexes are parsed as decimal" 'selection_number=$((10#$selection))'
+require_rule "$ENRA_SCRIPT" "Ethernet segment counts are parsed as decimal" 'segment_count=$((10#$segment_count))'
 require_rule "$ENRA_SCRIPT" "Bridge ports and extra segments only accept wired adapters" '[[ "$kind" == "Wired" ]] || continue'
 require_rule "$ENRA_SCRIPT" "Routed upstream selection can use a separate Wi-Fi adapter" '[[ "$kind" == "Wired" || "$kind" == "Wi-Fi" ]] || continue'
 require_rule "$ENRA_SCRIPT" "Interface choices include link state" 'interface_link_label "$iface"'
