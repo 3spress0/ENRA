@@ -24,6 +24,8 @@ require_rule "$ENRA_SCRIPT" "Wi-Fi adapters are filtered by access-point support
 require_rule "$ENRA_SCRIPT" "Bridge ports and extra segments only accept wired adapters" '[[ "$kind" == "Wired" ]] || continue'
 require_rule "$ENRA_SCRIPT" "Routed upstream selection can use a separate Wi-Fi adapter" '[[ "$kind" == "Wired" || "$kind" == "Wi-Fi" ]] || continue'
 require_rule "$ENRA_SCRIPT" "Interface choices include link state" 'interface_link_label "$iface"'
+require_rule "$ENRA_SCRIPT" "Wi-Fi link state checks association" 'iw dev "$iface" link 2>/dev/null | grep -q '^Connected to ''
+require_rule "$ENRA_SCRIPT" "Connected interfaces are preferred when no default route exists" 'elif (( connected_index > 0 )); then'
 require_rule "$ENRA_SCRIPT" "Interface choices include current IPv4 address" 'interface_ipv4_label "$iface"'
 require_rule "$ENRA_SCRIPT" "The computer default route is protected for bridge mode" 'In use; not selectable'
 require_rule "$ENRA_SCRIPT" "Routed mode automatically chooses a free subnet when defaults overlap" 'The recommended Wi-Fi subnet is already in use.'
