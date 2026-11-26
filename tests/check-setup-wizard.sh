@@ -40,3 +40,43 @@ require_rule "$ENRA_SCRIPT" "Country detection skips unset global regulatory dom
 require_rule "$README_FILE" "README includes one-command installation" 'curl -fsSL https://raw.githubusercontent.com/3spress0/ENRA/main/install.sh | sudo bash'
 
 printf 'ENRA first-run setup checks passed.\n'
+
+
+# Exercise the subnet allocator against representative existing private routes.
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf "$tmp_dir"' EXIT
+mkdir -p "$tmp_dir/bin"
+
+awk '
+    /^next_segment_network\(\) \{/ { active = 1 }
+    active && /python3 -/ { python = 1; next }
+    python && /^PY$/ { exit }
+    python { print }
+' "$ENRA_SCRIPT" > "$tmp_dir/next_segment_network.py"
+
+cat > "$tmp_dir/bin/ip" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+    "-4 route show table all") printf '%s\n' "${ENRA_TEST_ROUTES:-}" ;;
+    "-4 -o address show scope global") printf '%s\n' "${ENRA_TEST_ADDRESSES:-}" ;;
+    *) exit 1 ;;
+esac
+EOF
+chmod +x "$tmp_dir/bin/ip"
+
+result="$(ENRA_TEST_ROUTES='10.0.0.0/8 dev eth0 proto kernel scope link' PATH="$tmp_dir/bin:$PATH" python3 "$tmp_dir/next_segment_network.py")"
+[[ "$result" == "172.16.0.0/24" ]] || {
+    printf '[FAIL] Subnet allocator did not escape an occupied 10.0.0.0/8 range: %s\n' "$result" >&2
+    exit 1
+}
+printf '[PASS] Subnet allocator falls back to 172.16/12 when 10/8 is occupied.\n'
+
+result="$(ENRA_TEST_ROUTES=$'10.0.0.0/8 dev eth0 proto kernel scope link\n172.16.0.0/12 dev tun0 proto static' PATH="$tmp_dir/bin:$PATH" python3 "$tmp_dir/next_segment_network.py")"
+[[ "$result" == "192.168.0.0/24" ]] || {
+    printf '[FAIL] Subnet allocator did not use 192.168/16 when 10/8 and 172.16/12 are occupied: %s\n' "$result" >&2
+    exit 1
+}
+printf '[PASS] Subnet allocator falls back to 192.168/16 when 10/8 and 172.16/12 are occupied.\n'
+
+bash "$INSTALL_SCRIPT" --help >/dev/null
+printf '[PASS] Installer help is available without root privileges.\n'
