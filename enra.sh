@@ -744,6 +744,8 @@ configure_interfaces() {
 
     read -r -p "DNS server for connected devices [1.1.1.1]: " DNS_UPSTREAM
     DNS_UPSTREAM="${DNS_UPSTREAM:-1.1.1.1}"
+    python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' "$DNS_UPSTREAM" >/dev/null 2>&1 ||
+        die "Enter a valid IPv4 DNS server address, for example 1.1.1.1."
     SEGMENT_IFACES=("$WIFI_IF")
     SEGMENT_MACS=("$WIFI_MAC")
     SEGMENT_NAMES=("Wi-Fi")
