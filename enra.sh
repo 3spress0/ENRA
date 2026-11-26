@@ -488,7 +488,7 @@ discover_driver() {
 }
 
 choose_wireless_interface() {
-    local iface selected="" default_index=1 selection i
+    local iface selected="" default_index=1 selection selection_number i
     local -a choices=()
     mapfile -t choices < <(wireless_ap_interfaces)
     if (("${#choices[@]}" == 0)); then
@@ -515,8 +515,13 @@ choose_wireless_interface() {
         done
         read -r -p "Select the Wi-Fi adapter by number [$default_index]: " selection
         selection="${selection:-$default_index}"
-        if [[ "$selection" =~ ^[0-9]+$ ]] && ((selection >= 1 && selection <= ${#choices[@]})); then
-            WIFI_IF="${choices[$((selection - 1))]}"
+        if [[ "$selection" =~ ^[0-9]+$ ]]; then
+            selection_number=$((10#$selection))
+        else
+            selection_number=0
+        fi
+        if ((selection_number >= 1 && selection_number <= ${#choices[@]})); then
+            WIFI_IF="${choices[$((selection_number - 1))]}"
         else
             for iface in "${choices[@]}"; do
                 if [[ "$selection" == "$iface" ]]; then
@@ -553,7 +558,7 @@ choose_network_mode() {
 
 choose_interface() {
     local prompt="$1" protect_default="$2" iface path kind link ipv4 route selected
-    local default_index=1 default_route_index=0 connected_index=0 selection i found=no
+    local default_index=1 default_route_index=0 connected_index=0 selection selection_number i found=no
     local -a choices=()
 
     printf '\n%s\n' "$prompt" >&2
@@ -608,8 +613,13 @@ choose_interface() {
 
     read -r -p "Select an adapter by number [$default_index]: " selected
     selected="${selected:-$default_index}"
-    if [[ "$selected" =~ ^[0-9]+$ ]] && ((selected >= 1 && selected <= ${#choices[@]})); then
-        selected="${choices[$((selected - 1))]}"
+    if [[ "$selected" =~ ^[0-9]+$ ]]; then
+        selection_number=$((10#$selected))
+    else
+        selection_number=0
+    fi
+    if ((selection_number >= 1 && selection_number <= ${#choices[@]})); then
+        selected="${choices[$((selection_number - 1))]}"
     else
         for iface in "${choices[@]}"; do
             if [[ "$selected" == "$iface" ]]; then
@@ -787,7 +797,8 @@ configure_interfaces() {
     else
         segment_count=0
     fi
-    [[ "$segment_count" =~ ^(0|[1-9][0-9]*)$ ]] || die "Enter a whole number of additional wired adapters."
+    [[ "$segment_count" =~ ^[0-9]+$ ]] || die "Enter a whole number of additional wired adapters."
+    segment_count=$((10#$segment_count))
     (( segment_count <= 32 )) || die "ENRA supports up to 32 additional wired network segments."
 
     for ((i = 1; i <= segment_count; i++)); do
