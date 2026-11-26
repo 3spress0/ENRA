@@ -82,10 +82,10 @@ if [[ -r /etc/enra/enra.conf ]]; then
     "$INSTALL_PATH" refresh
 elif [[ "$RUN_SETUP" == "true" ]]; then
     printf '\n[ENRA installer] Starting the guided first-time setup...\n'
-    if [[ -r /dev/tty ]]; then
-        "$INSTALL_PATH" setup </dev/tty
-    else
+    if [[ -t 0 ]]; then
         "$INSTALL_PATH" setup
+    else
+        "$INSTALL_PATH" setup </dev/tty
     fi
 else
     printf '[ENRA installer] Installation complete. Start setup with: sudo enra setup\n'
