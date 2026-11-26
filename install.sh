@@ -26,7 +26,15 @@ case "${1:-}" in
     *) die "Unknown option: $1. Use --help for usage." ;;
 esac
 
-if [[ ! -r /dev/tty && ! -t 0 ]]; then
+HAS_TTY=false
+if [[ -t 0 ]]; then
+    HAS_TTY=true
+elif exec 9</dev/tty 2>/dev/null; then
+    exec 9<&-
+    HAS_TTY=true
+fi
+
+if [[ "$HAS_TTY" != "true" ]]; then
     RUN_SETUP=false
 fi
 
