@@ -9,8 +9,6 @@ die() {
     exit 1
 }
 
-[[ "$EUID" -eq 0 ]] || die "Run as root: curl -fsSL https://raw.githubusercontent.com/3spress0/ENRA/main/install.sh | sudo bash"
-
 RUN_SETUP=true
 case "${1:-}" in
     "") ;;
@@ -25,6 +23,8 @@ case "${1:-}" in
         ;;
     *) die "Unknown option: $1. Use --help for usage." ;;
 esac
+
+[[ "$EUID" -eq 0 ]] || die "Run as root: curl -fsSL https://raw.githubusercontent.com/3spress0/ENRA/main/install.sh | sudo bash"
 
 HAS_TTY=false
 if [[ -t 0 ]]; then
